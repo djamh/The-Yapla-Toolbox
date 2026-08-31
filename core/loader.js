@@ -1,4 +1,4 @@
-```javascript
+javascript
 (() => {
     "use strict";
 
@@ -176,4 +176,4 @@
         console.log("[Yapla Toolbox] Loader loaded.");
     }
 })();
-```
+
