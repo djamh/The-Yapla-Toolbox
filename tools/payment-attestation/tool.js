@@ -51,7 +51,7 @@
             const existing =
                 getJob();
 
-            if (
+         if (
                 existing &&
                 existing.invoice?.billingId ===
                     currentBillingId() &&
@@ -60,18 +60,17 @@
                     'cancelled',
                 ].includes(existing.status)
             ) {
-                renderStatus(existing);
-
                 if (
                     existing.status ===
                     'stripeDataReady'
                 ) {
-                    processStripeResult(
-                        existing
-                    );
+                    processStripeResult(existing);
+                    return;
                 }
-
-                return;
+            
+                // Ancienne tâche incomplète : on la supprime
+                // et on recommence proprement.
+                deleteJob();
             }
 
             start();
