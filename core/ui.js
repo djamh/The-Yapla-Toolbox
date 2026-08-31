@@ -1,4 +1,3 @@
-```javascript
 (() => {
     "use strict";
 
@@ -402,4 +401,4 @@
         console.log("[Yapla Toolbox] UI module loaded.");
     }
 })();
-```
+
