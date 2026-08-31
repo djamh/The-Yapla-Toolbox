@@ -1485,87 +1485,141 @@
     // ============================================================
 
     function installStripeResultListener() {
-        if (
-            window.__ytbPaymentAttestationV2Listener
-        ) {
-            return;
-        }
+    if (
+        window.__ytbPaymentAttestationV2Listener
+    ) {
+        return;
+    }
 
-        window.__ytbPaymentAttestationV2Listener =
-            true;
+    window.__ytbPaymentAttestationV2Listener =
+        true;
 
-        window.addEventListener(
-            'message',
-            event => {
-                if (
-                    event.origin !==
-                    'https://dashboard.stripe.com'
-                ) {
-                    return;
-                }
+    const receiveStripeResult =
+        data => {
+            if (
+                !data ||
+                data.type !==
+                    'YTB_PAYMENT_ATTESTATION_STRIPE_RESULT'
+            ) {
+                return;
+            }
 
-                const data =
-                    event.data;
+            const job =
+                getJob();
 
-                if (
-                    !data ||
-                    data.source !==
-                        'yapla-toolbox-stripe' ||
-                    data.type !==
-                        'YTB_PAYMENT_ATTESTATION_STRIPE_RESULT'
-                ) {
-                    return;
-                }
+            if (!job) {
+                console.warn(
+                    '[Attestation] Aucun job Yapla actif.'
+                );
+                return;
+            }
 
-                const job =
-                    getJob();
-
-                if (!job) {
-                    return;
-                }
-
-                if (
-                    data.paymentNumber &&
+            if (
+                data.paymentNumber &&
+                String(
+                    data.paymentNumber
+                ) !==
                     String(
-                        data.paymentNumber
-                    ) !==
-                        String(
-                            job
-                                .selectedPayment
-                                .paymentNumber
-                        )
-                ) {
-                    console.warn(
-                        '[Attestation] Mauvais paiement Stripe reçu.'
-                    );
-                    return;
-                }
-
-                if (
-                    !data.stripe
-                ) {
-                    return;
-                }
-
-                job.stripe =
-                    data.stripe;
-
-                job.status =
-                    'stripeDataReady';
-
-                job.warnings =
-                    buildWarnings(
                         job
-                    );
+                            .selectedPayment
+                            .paymentNumber
+                    )
+            ) {
+                console.warn(
+                    '[Attestation] Le numéro de paiement Stripe ne correspond pas.'
+                );
+                return;
+            }
 
-                saveJob(job);
+            if (!data.stripe) {
+                return;
+            }
 
-                processStripeResult(
+            job.stripe =
+                data.stripe;
+
+            job.status =
+                'stripeDataReady';
+
+            job.warnings =
+                buildWarnings(
                     job
                 );
+
+            saveJob(job);
+
+            processStripeResult(
+                job
+            );
+        };
+
+    window.addEventListener(
+        'message',
+        event => {
+            if (
+                event.origin !==
+                    'https://dashboard.stripe.com'
+            ) {
+                return;
             }
-        );
-    }
+
+            const data =
+                event.data;
+
+            /*
+             * Stripe crée ce canal AVANT
+             * d'ouvrir la fiche paiement.
+             */
+            if (
+                data?.source ===
+                    'yapla-toolbox-stripe' &&
+                data?.type ===
+                    'YTB_PAYMENT_ATTESTATION_CHANNEL'
+            ) {
+                const port =
+                    event.ports?.[0];
+
+                if (!port) {
+                    console.warn(
+                        '[Attestation] MessageChannel absent.'
+                    );
+                    return;
+                }
+
+                window.__ytbPaymentAttestationStripePort =
+                    port;
+
+                port.onmessage =
+                    portEvent => {
+                        receiveStripeResult(
+                            portEvent.data
+                        );
+                    };
+
+                port.start?.();
+
+                console.log(
+                    '[Attestation] Canal Stripe connecté.'
+                );
+
+                return;
+            }
+
+            /*
+             * Fallback si window.opener
+             * fonctionne encore.
+             */
+            if (
+                data?.source ===
+                    'yapla-toolbox-stripe'
+            ) {
+                receiveStripeResult(
+                    data
+                );
+            }
+        }
+    );
+}
 
     function buildWarnings(job) {
         const warnings = [];
