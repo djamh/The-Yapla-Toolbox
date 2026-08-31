@@ -55,6 +55,14 @@
             icon: "🌐",
             description: "Rechercher dans toutes les pages de traduction.",
             script: "tools/translation-search/tool.js"
+        },
+        {
+            id: "donor-import",
+            name: "Import de donateurs",
+            category: "Dons",
+            icon: "📄",
+            description: "Importer des donateurs depuis un fichier CSV ou Excel.",
+            script: "tools/donor-import/tool.js"
         }
     ];
 
