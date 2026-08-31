@@ -63,6 +63,14 @@
             icon: "📄",
             description: "Importer des donateurs depuis un fichier CSV ou Excel.",
             script: "tools/donor-import/tool.js"
+        },
+        {
+            id: "mass-mod",
+            name: "Modification en masse",
+            category: "Membres",
+            icon: "👥",
+            description: "Modifier un champ pour plusieurs membres depuis un fichier Excel ou CSV.",
+            script: "tools/mass-mod/tool.js"
         }
     ];
 
