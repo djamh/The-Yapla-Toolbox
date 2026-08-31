@@ -1,4 +1,3 @@
-javascript
 (async () => {
     "use strict";
 
