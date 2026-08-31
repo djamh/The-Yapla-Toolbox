@@ -27,7 +27,7 @@
      * Example:
      * https://djamh.github.io/yapla-toolbox
      */
-    const BASE_URL = "https://YOUR-USERNAME.github.io/yapla-toolbox";
+    const BASE_URL = "https://djamh.github.io/yapla-toolbox";
 
     /*
      * These are the core files required by the toolbox.
