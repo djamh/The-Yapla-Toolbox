@@ -1,4 +1,4 @@
-```javascript
+javascript
 (async () => {
     "use strict";
 
@@ -139,4 +139,4 @@
         delete window[TOOLBOX_GLOBAL];
     }
 })();
-```
+
