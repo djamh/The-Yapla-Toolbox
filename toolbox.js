@@ -71,6 +71,14 @@
             icon: "👥",
             description: "Modifier un champ pour plusieurs membres depuis un fichier Excel ou CSV.",
             script: "tools/mass-mod/tool.js"
+        },
+        {
+            id: "payment-attestation",
+            name: "Attestation de paiement",
+            category: "Comptabilité",
+            icon: "🧾",
+            description: "Générer une attestation de paiement à partir de Yapla et Stripe.",
+            script: "tools/payment-attestation/tool.js"
         }
     ];
 
