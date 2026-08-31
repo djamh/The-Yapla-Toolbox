@@ -3,20 +3,8 @@
 
     const TOOL_ID = 'payment-attestation';
 
-    const IDS = {
-        style: 'ytb-payment-attestation-styles',
-        modal: 'ytb-payment-attestation-modal',
-        status: 'ytb-payment-attestation-status',
-    };
-
     const STORAGE_KEY =
-        'yapla_toolbox_payment_attestation_job_v1';
-
-    const STRIPE_SESSION_KEY =
-        'yapla_toolbox_payment_attestation_stripe_session';
-
-    const JOB_MAX_AGE_MS =
-        6 * 60 * 60 * 1000;
+        'yapla_toolbox_payment_attestation_job_v2';
 
     const STRIPE_ACCOUNTS = {
         s1: 'acct_1GWTo1Aioa7GoDvO',
@@ -35,118 +23,101 @@
     const AUTOTABLE_URL =
         'https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.4/dist/jspdf.plugin.autotable.min.js';
 
+    const IDS = {
+        style: 'ytb-pa-style',
+        modal: 'ytb-pa-modal',
+        status: 'ytb-pa-status',
+    };
+
     window.YaplaToolbox.registerTool({
         id: TOOL_ID,
         name: 'Attestation de paiement',
         category: 'Comptabilité',
         icon: '🧾',
-        description: 'Générer une attestation de paiement à partir de Yapla et Stripe.',
+        description:
+            'Générer une attestation de paiement à partir de Yapla et Stripe.',
 
         async run() {
-            if (window !== window.top) {
+            if (!isInvoicePage()) {
                 alert(
-                    'Cet outil doit être lancé dans la fenêtre principale.'
+                    'Lance cet outil depuis une facture Yapla.'
                 );
                 return;
             }
 
             installStyles();
+            installStripeResultListener();
 
-            if (isYaplaInvoicePage()) {
-                await runOnYapla();
+            const existing =
+                getJob();
+
+            if (
+                existing &&
+                existing.invoice?.billingId ===
+                    currentBillingId() &&
+                ![
+                    'completed',
+                    'cancelled',
+                ].includes(existing.status)
+            ) {
+                renderStatus(existing);
+
+                if (
+                    existing.status ===
+                    'stripeDataReady'
+                ) {
+                    processStripeResult(
+                        existing
+                    );
+                }
+
                 return;
             }
 
-            if (location.hostname === 'dashboard.stripe.com') {
-                await runOnStripe();
-                return;
-            }
-
-            alert(
-                'Cet outil doit être lancé depuis :\n\n' +
-                '• une facture Yapla\n' +
-                '• ou dashboard.stripe.com pendant une recherche d’attestation.'
-            );
+            start();
         },
     });
 
-    /*
-     * ============================================================
-     * ENVIRONMENT
-     * ============================================================
-     */
+    // ============================================================
+    // ENVIRONMENT
+    // ============================================================
 
-    function isYaplaInvoicePage() {
+    function isInvoicePage() {
         return (
-            /^s[12]\.yapla\.com$/i.test(location.hostname) &&
+            /^s[12]\.yapla\.com$/i.test(
+                location.hostname
+            ) &&
             /\/accounting\/[^/]+\/billing\/view\/billingId\//i.test(
                 location.pathname
             )
         );
     }
 
-    function isYaplaHost(hostname = location.hostname) {
-        return /^s[12]\.yapla\.com$/i.test(hostname);
+    function currentBillingId() {
+        return (
+            location.pathname.match(
+                /billingId\/(\d+)/i
+            )?.[1] || ''
+        );
     }
 
-    /*
-     * ============================================================
-     * STORAGE
-     * ============================================================
-     */
+    // ============================================================
+    // STORAGE
+    // ============================================================
 
     function getJob() {
-        if (!isYaplaHost()) {
-            return null;
-        }
-
         try {
-            const raw =
-                localStorage.getItem(STORAGE_KEY);
-
-            if (!raw) {
-                return null;
-            }
-
-            const job =
-                JSON.parse(raw);
-
-            if (
-                !job ||
-                typeof job !== 'object'
-            ) {
-                return null;
-            }
-
-            if (
-                !job.createdAt ||
-                Date.now() -
-                    job.createdAt >
-                    JOB_MAX_AGE_MS
-            ) {
-                localStorage.removeItem(
+            return JSON.parse(
+                localStorage.getItem(
                     STORAGE_KEY
-                );
-
-                return null;
-            }
-
-            return job;
-        } catch (error) {
-            console.warn(
-                '[Attestation Yapla] Job illisible.',
-                error
+                ) || 'null'
             );
-
+        } catch {
             return null;
         }
     }
 
     function saveJob(job) {
-        if (!isYaplaHost()) {
-            return;
-        }
-
         job.updatedAt =
             Date.now();
 
@@ -157,294 +128,14 @@
     }
 
     function deleteJob() {
-        if (!isYaplaHost()) {
-            return;
-        }
-
         localStorage.removeItem(
             STORAGE_KEY
         );
     }
 
-    function getStripeSession() {
-        try {
-            return JSON.parse(
-                sessionStorage.getItem(
-                    STRIPE_SESSION_KEY
-                ) || 'null'
-            );
-        } catch {
-            return null;
-        }
-    }
-
-    function saveStripeSession(value) {
-        sessionStorage.setItem(
-            STRIPE_SESSION_KEY,
-            JSON.stringify(value)
-        );
-    }
-
-    /*
-     * ============================================================
-     * STYLES
-     * ============================================================
-     */
-
-    function installStyles() {
-        if (
-            document.getElementById(
-                IDS.style
-            )
-        ) {
-            return;
-        }
-
-        const style =
-            document.createElement('style');
-
-        style.id =
-            IDS.style;
-
-        style.textContent = `
-            #${IDS.modal} {
-                position: fixed;
-                inset: 0;
-                z-index: 2147483005;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                padding: 22px;
-                background: rgba(15,23,42,.58);
-                font-family: Arial, sans-serif;
-            }
-
-            #${IDS.modal} .ya-card {
-                width: min(760px, 100%);
-                max-height: min(84vh, 900px);
-                overflow: auto;
-                border-radius: 12px;
-                background: #fff;
-                color: #1f2937;
-                box-shadow: 0 24px 70px rgba(0,0,0,.35);
-            }
-
-            #${IDS.modal} .ya-head {
-                position: sticky;
-                top: 0;
-                z-index: 2;
-                padding: 19px 22px 14px;
-                border-bottom: 1px solid #e5e7eb;
-                background: #fff;
-            }
-
-            #${IDS.modal} .ya-head h2 {
-                margin: 0;
-                font-size: 20px;
-                line-height: 1.3;
-            }
-
-            #${IDS.modal} .ya-head p {
-                margin: 7px 0 0;
-                color: #6b7280;
-                font-size: 13px;
-            }
-
-            #${IDS.modal} .ya-body {
-                padding: 18px 22px;
-            }
-
-            #${IDS.modal} .ya-actions {
-                position: sticky;
-                bottom: 0;
-                display: flex;
-                justify-content: flex-end;
-                gap: 10px;
-                padding: 14px 22px;
-                border-top: 1px solid #e5e7eb;
-                background: #fff;
-            }
-
-            #${IDS.modal} .ya-btn,
-            #${IDS.status} .ya-btn {
-                border: 1px solid #d1d5db;
-                border-radius: 7px;
-                padding: 10px 14px;
-                background: #fff;
-                color: #111827;
-                font-weight: 700;
-                cursor: pointer;
-            }
-
-            #${IDS.modal} .ya-btn-primary,
-            #${IDS.status} .ya-btn-primary {
-                border-color: #ff7b14;
-                background: #ff7b14;
-                color: #fff;
-            }
-
-            #${IDS.modal} .ya-btn:disabled {
-                opacity: .45;
-                cursor: not-allowed;
-            }
-
-            #${IDS.modal} .ya-option {
-                display: grid;
-                grid-template-columns: 24px 1fr;
-                gap: 10px;
-                margin: 0 0 11px;
-                padding: 14px;
-                border: 1px solid #dbe1e8;
-                border-radius: 9px;
-                cursor: pointer;
-            }
-
-            #${IDS.modal} .ya-option:hover {
-                border-color: #ff7b14;
-            }
-
-            #${IDS.modal} .ya-option input {
-                margin-top: 4px;
-            }
-
-            #${IDS.modal} .ya-option-title {
-                font-weight: 700;
-            }
-
-            #${IDS.modal} .ya-option-details {
-                margin-top: 5px;
-                color: #4b5563;
-                font-size: 13px;
-                line-height: 1.5;
-                white-space: pre-line;
-            }
-
-            #${IDS.modal} .ya-summary {
-                display: grid;
-                grid-template-columns: minmax(150px,210px) 1fr;
-                gap: 8px 14px;
-                margin-bottom: 16px;
-                font-size: 14px;
-            }
-
-            #${IDS.modal} .ya-summary dt {
-                color: #6b7280;
-                font-weight: 700;
-            }
-
-            #${IDS.modal} .ya-summary dd {
-                margin: 0;
-            }
-
-            #${IDS.modal} .ya-warning-box {
-                margin-top: 16px;
-                padding: 13px 15px;
-                border: 1px solid #f59e0b;
-                border-radius: 8px;
-                background: #fffbeb;
-            }
-
-            #${IDS.modal} .ya-warning-box strong {
-                color: #92400e;
-            }
-
-            #${IDS.modal} .ya-warning-box ul {
-                margin: 8px 0 0;
-                padding-left: 20px;
-            }
-
-            #${IDS.modal} .ya-ok-box {
-                margin-top: 16px;
-                padding: 12px 14px;
-                border: 1px solid #86efac;
-                border-radius: 8px;
-                background: #f0fdf4;
-                color: #166534;
-                font-weight: 700;
-            }
-
-            #${IDS.status} {
-                position: fixed;
-                right: 22px;
-                bottom: 22px;
-                z-index: 2147483004;
-                width: min(500px, calc(100vw - 44px));
-                max-height: 66vh;
-                overflow: auto;
-                padding: 15px 16px;
-                border: 1px solid #dbe1e8;
-                border-radius: 10px;
-                background: #fff;
-                color: #1f2937;
-                box-shadow: 0 14px 40px rgba(0,0,0,.24);
-                font: 14px/1.45 Arial, sans-serif;
-            }
-
-            #${IDS.status} strong {
-                display: block;
-                margin-bottom: 5px;
-            }
-
-            #${IDS.status} .ya-status-actions {
-                display: flex;
-                flex-wrap: wrap;
-                gap: 8px;
-                margin-top: 11px;
-            }
-
-            #${IDS.status} .ya-status-actions a {
-                display: inline-block;
-                border: 1px solid #d1d5db;
-                border-radius: 6px;
-                padding: 7px 10px;
-                background: #fff;
-                color: #111827;
-                font-weight: 700;
-                text-decoration: none;
-            }
-
-            #${IDS.status} .ya-progress-log {
-                margin: 10px 0 0;
-                padding: 0;
-                list-style: none;
-                font-size: 12px;
-                color: #475569;
-            }
-
-            #${IDS.status} .ya-progress-log li {
-                display: grid;
-                grid-template-columns: 62px 1fr;
-                gap: 7px;
-                margin: 0;
-                padding: 5px 0;
-                border-bottom: 1px solid #eef2f7;
-            }
-
-            #${IDS.status} .ya-progress-log time {
-                color: #94a3b8;
-                font-variant-numeric: tabular-nums;
-            }
-
-            #${IDS.status} .ya-warning {
-                margin-top: 10px;
-                padding: 10px;
-                border: 1px solid #f59e0b;
-                border-radius: 7px;
-                background: #fffbeb;
-                color: #92400e;
-            }
-        `;
-
-        document.head.appendChild(
-            style
-        );
-    }
-
-    /*
-     * ============================================================
-     * GENERIC HELPERS
-     * ============================================================
-     */
+    // ============================================================
+    // GENERIC
+    // ============================================================
 
     function cleanText(value) {
         return String(value ?? '')
@@ -457,10 +148,16 @@
     function normalizeKey(value) {
         return cleanText(value)
             .normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '')
+            .replace(
+                /[\u0300-\u036f]/g,
+                ''
+            )
             .replace(/[°º]/g, '')
             .replace(/[’']/g, '')
-            .replace(/[^a-zA-Z0-9]+/g, ' ')
+            .replace(
+                /[^a-zA-Z0-9]+/g,
+                ' '
+            )
             .toLowerCase()
             .trim();
     }
@@ -476,30 +173,21 @@
 
     function safeFilePart(value) {
         return cleanText(value)
-            .replace(/[\\/:*?"<>|]+/g, '-')
-            .replace(/\s+/g, ' ')
+            .replace(
+                /[\\/:*?"<>|]+/g,
+                '-'
+            )
             .slice(0, 90)
             .trim() || 'document';
     }
 
-    function textOf(selector, root = document) {
-        const element =
-            root.querySelector(selector);
-
+    function textOf(
+        selector,
+        root = document
+    ) {
         return cleanText(
-            element
-                ? element.textContent
-                : ''
-        );
-    }
-
-    function delay(ms) {
-        return new Promise(
-            resolve =>
-                setTimeout(
-                    resolve,
-                    ms
-                )
+            root.querySelector(selector)
+                ?.textContent || ''
         );
     }
 
@@ -529,12 +217,12 @@
                 ) || []
             )[0] || '';
 
-        const numberMatch =
+        const match =
             original.match(
                 /[-+]?\d[\d\s.,'’]*/
             );
 
-        if (!numberMatch) {
+        if (!match) {
             return {
                 amount: null,
                 currency:
@@ -545,42 +233,37 @@
         }
 
         let raw =
-            numberMatch[0]
-                .replace(
-                    /[\s'’]/g,
-                    ''
-                );
+            match[0].replace(
+                /[\s'’]/g,
+                ''
+            );
 
-        const lastComma =
+        const comma =
             raw.lastIndexOf(',');
 
-        const lastDot =
+        const dot =
             raw.lastIndexOf('.');
 
         if (
-            lastComma !== -1 &&
-            lastDot !== -1
+            comma !== -1 &&
+            dot !== -1
         ) {
-            const decimalSeparator =
-                lastComma > lastDot
+            const decimal =
+                comma > dot
                     ? ','
                     : '.';
 
-            const thousandsSeparator =
-                decimalSeparator === ','
+            const thousands =
+                decimal === ','
                     ? '.'
                     : ',';
 
             raw =
                 raw
-                    .split(
-                        thousandsSeparator
-                    )
+                    .split(thousands)
                     .join('');
 
-            if (
-                decimalSeparator === ','
-            ) {
+            if (decimal === ',') {
                 raw =
                     raw.replace(
                         ',',
@@ -588,11 +271,11 @@
                     );
             }
         } else if (
-            lastComma !== -1
+            comma !== -1
         ) {
             const decimals =
                 raw.length -
-                lastComma -
+                comma -
                 1;
 
             raw =
@@ -607,18 +290,16 @@
                         ''
                     );
         } else if (
-            lastDot !== -1
+            dot !== -1
         ) {
             const decimals =
                 raw.length -
-                lastDot -
+                dot -
                 1;
 
             if (
-                !(
-                    decimals === 1 ||
-                    decimals === 2
-                )
+                decimals !== 1 &&
+                decimals !== 2
             ) {
                 raw =
                     raw.replace(
@@ -633,7 +314,9 @@
 
         return {
             amount:
-                Number.isFinite(amount)
+                Number.isFinite(
+                    amount
+                )
                     ? amount
                     : null,
 
@@ -649,25 +332,27 @@
         value,
         fallback = 'CAD'
     ) {
-        const raw =
+        const valueClean =
             cleanText(value)
                 .toUpperCase();
 
         if (
-            /^[A-Z]{3}$/.test(raw)
+            /^[A-Z]{3}$/.test(
+                valueClean
+            )
         ) {
-            return raw;
+            return valueClean;
         }
 
-        if (raw === '$') {
+        if (valueClean === '$') {
             return fallback;
         }
 
-        if (raw === '€') {
+        if (valueClean === '€') {
             return 'EUR';
         }
 
-        if (raw === '£') {
+        if (valueClean === '£') {
             return 'GBP';
         }
 
@@ -678,40 +363,47 @@
         amount,
         currency = 'CAD'
     ) {
+        const number =
+            Number(amount);
+
         const safeAmount =
-            Number.isFinite(
-                Number(amount)
-            )
-                ? Number(amount)
+            Number.isFinite(number)
+                ? number
                 : 0;
 
         const safeCurrency =
             normalizeCurrency(
-                currency,
-                'CAD'
+                currency
             );
 
         try {
             return new Intl.NumberFormat(
                 'fr-CA',
                 {
-                    style: 'currency',
+                    style:
+                        'currency',
+
                     currency:
                         safeCurrency,
-                    minimumFractionDigits: 2,
-                    maximumFractionDigits: 2,
+
+                    minimumFractionDigits:
+                        2,
+
+                    maximumFractionDigits:
+                        2,
                 }
             )
-                .format(
-                    safeAmount
-                )
+                .format(safeAmount)
                 .replace(
                     /\u00a0/g,
                     ' '
                 );
         } catch {
             return (
-                `${safeAmount.toFixed(2)} ` +
+                safeAmount.toFixed(
+                    2
+                ) +
+                ' ' +
                 safeCurrency
             );
         }
@@ -730,11 +422,144 @@
         );
     }
 
-    /*
-     * ============================================================
-     * MODAL / STATUS
-     * ============================================================
-     */
+    // ============================================================
+    // STYLE
+    // ============================================================
+
+    function installStyles() {
+        if (
+            document.getElementById(
+                IDS.style
+            )
+        ) {
+            return;
+        }
+
+        const style =
+            document.createElement(
+                'style'
+            );
+
+        style.id =
+            IDS.style;
+
+        style.textContent = `
+            #${IDS.modal} {
+                position: fixed;
+                inset: 0;
+                z-index: 2147483646;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                background: rgba(15,23,42,.55);
+                padding: 20px;
+                font-family: Arial,sans-serif;
+            }
+
+            #${IDS.modal} .card {
+                width: min(720px,100%);
+                max-height: 85vh;
+                overflow: auto;
+                background: white;
+                border-radius: 12px;
+                box-shadow: 0 20px 60px rgba(0,0,0,.3);
+            }
+
+            #${IDS.modal} .head {
+                padding: 18px 20px;
+                border-bottom: 1px solid #e5e7eb;
+            }
+
+            #${IDS.modal} h2 {
+                margin: 0;
+                font-size: 20px;
+            }
+
+            #${IDS.modal} .body {
+                padding: 18px 20px;
+            }
+
+            #${IDS.modal} .actions {
+                display: flex;
+                justify-content: flex-end;
+                gap: 10px;
+                padding: 14px 20px;
+                border-top: 1px solid #e5e7eb;
+            }
+
+            #${IDS.modal} button,
+            #${IDS.status} button {
+                border: 1px solid #d1d5db;
+                border-radius: 7px;
+                padding: 9px 13px;
+                background: #fff;
+                cursor: pointer;
+                font-weight: 700;
+            }
+
+            #${IDS.modal} .primary {
+                background: #ff7b14;
+                border-color: #ff7b14;
+                color: white;
+            }
+
+            #${IDS.modal} .option {
+                display: block;
+                padding: 13px;
+                margin-bottom: 10px;
+                border: 1px solid #dbe1e8;
+                border-radius: 8px;
+                cursor: pointer;
+            }
+
+            #${IDS.modal} .option:hover {
+                border-color: #ff7b14;
+            }
+
+            #${IDS.modal} .details {
+                display: block;
+                margin: 5px 0 0 25px;
+                color: #64748b;
+                font-size: 13px;
+                line-height: 1.5;
+            }
+
+            #${IDS.modal} .warning {
+                padding: 12px;
+                border: 1px solid #f59e0b;
+                background: #fffbeb;
+                border-radius: 8px;
+                margin-top: 15px;
+            }
+
+            #${IDS.status} {
+                position: fixed;
+                right: 20px;
+                bottom: 20px;
+                z-index: 2147483645;
+                width: min(430px,calc(100vw - 40px));
+                background: white;
+                border: 1px solid #dbe1e8;
+                border-radius: 10px;
+                padding: 15px;
+                box-shadow: 0 14px 40px rgba(0,0,0,.22);
+                font: 14px/1.45 Arial,sans-serif;
+            }
+
+            #${IDS.status} strong {
+                display: block;
+                margin-bottom: 5px;
+            }
+        `;
+
+        document.head.appendChild(
+            style
+        );
+    }
+
+    // ============================================================
+    // MODAL
+    // ============================================================
 
     function removeModal() {
         document
@@ -746,63 +571,39 @@
 
     function showModal({
         title,
-        subtitle = '',
-        bodyHtml = '',
-        confirmText = 'Continuer',
-        cancelText = 'Annuler',
-        confirmDisabled = false,
+        body,
+        confirmText =
+            'Continuer',
         onConfirm,
-        onCancel,
     }) {
         removeModal();
 
-        const overlay =
+        const modal =
             document.createElement(
                 'div'
             );
 
-        overlay.id =
+        modal.id =
             IDS.modal;
 
-        overlay.innerHTML = `
-            <div
-                class="ya-card"
-                role="dialog"
-                aria-modal="true"
-            >
-                <div class="ya-head">
+        modal.innerHTML = `
+            <div class="card">
+                <div class="head">
                     <h2>
                         ${escapeHtml(title)}
                     </h2>
-
-                    ${
-                        subtitle
-                            ? `<p>${escapeHtml(subtitle)}</p>`
-                            : ''
-                    }
                 </div>
 
-                <div class="ya-body">
-                    ${bodyHtml}
+                <div class="body">
+                    ${body}
                 </div>
 
-                <div class="ya-actions">
-                    <button
-                        type="button"
-                        class="ya-btn ya-cancel"
-                    >
-                        ${escapeHtml(cancelText)}
+                <div class="actions">
+                    <button class="cancel">
+                        Annuler
                     </button>
 
-                    <button
-                        type="button"
-                        class="ya-btn ya-btn-primary ya-confirm"
-                        ${
-                            confirmDisabled
-                                ? 'disabled'
-                                : ''
-                        }
-                    >
+                    <button class="primary confirm">
                         ${escapeHtml(confirmText)}
                     </button>
                 </div>
@@ -810,344 +611,72 @@
         `;
 
         document.body.appendChild(
-            overlay
+            modal
         );
 
-        const confirmButton =
-            overlay.querySelector(
-                '.ya-confirm'
-            );
+        modal
+            .querySelector(
+                '.cancel'
+            )
+            .onclick =
+            removeModal;
 
-        const cancelButton =
-            overlay.querySelector(
-                '.ya-cancel'
-            );
+        modal
+            .querySelector(
+                '.confirm'
+            )
+            .onclick =
+            () =>
+                onConfirm?.(
+                    modal
+                );
 
-        confirmButton.addEventListener(
-            'click',
-            () => {
-                if (
-                    typeof onConfirm ===
-                    'function'
-                ) {
-                    onConfirm({
-                        overlay,
-                        confirmButton,
-                        cancelButton,
-                    });
-                }
-            }
-        );
-
-        cancelButton.addEventListener(
-            'click',
-            () => {
-                removeModal();
-
-                if (
-                    typeof onCancel ===
-                    'function'
-                ) {
-                    onCancel();
-                }
-            }
-        );
-
-        return {
-            overlay,
-            confirmButton,
-            cancelButton,
-        };
+        return modal;
     }
 
     function showStatus(
-        title,
-        message,
-        actions = []
+        message
     ) {
-        document
-            .getElementById(
+        let box =
+            document.getElementById(
                 IDS.status
-            )
-            ?.remove();
-
-        const box =
-            document.createElement(
-                'div'
             );
 
-        box.id =
-            IDS.status;
+        if (!box) {
+            box =
+                document.createElement(
+                    'div'
+                );
+
+            box.id =
+                IDS.status;
+
+            document.body.appendChild(
+                box
+            );
+        }
 
         box.innerHTML = `
             <strong>
-                ${escapeHtml(title)}
+                Attestation de paiement
             </strong>
 
             <div>
                 ${escapeHtml(message)}
             </div>
-
-            ${
-                actions.length
-                    ? '<div class="ya-status-actions"></div>'
-                    : ''
-            }
         `;
-
-        document.body.appendChild(
-            box
-        );
-
-        const actionBox =
-            box.querySelector(
-                '.ya-status-actions'
-            );
-
-        for (
-            const action of actions
-        ) {
-            if (action.href) {
-                const link =
-                    document.createElement(
-                        'a'
-                    );
-
-                link.href =
-                    action.href;
-
-                link.textContent =
-                    action.label;
-
-                link.target =
-                    action.target ||
-                    '_blank';
-
-                link.rel =
-                    'noopener noreferrer';
-
-                actionBox.appendChild(
-                    link
-                );
-            } else {
-                const button =
-                    document.createElement(
-                        'button'
-                    );
-
-                button.type =
-                    'button';
-
-                button.className =
-                    'ya-btn';
-
-                button.textContent =
-                    action.label;
-
-                button.addEventListener(
-                    'click',
-                    action.onClick
-                );
-
-                actionBox.appendChild(
-                    button
-                );
-            }
-        }
-
-        return box;
     }
 
-    /*
-     * ============================================================
-     * PDF LIBRARIES
-     * ============================================================
-     */
-
-    async function ensurePdfLibraries() {
-        if (
-            window.jspdf?.jsPDF?.API
-                ?.autoTable
-        ) {
-            return window.jspdf;
-        }
-
-        if (
-            !window.jspdf?.jsPDF
-        ) {
-            await loadExternalScript(
-                PDF_URL,
-                'ytb-payment-attestation-jspdf'
-            );
-        }
-
-        if (
-            !window.jspdf?.jsPDF?.API
-                ?.autoTable
-        ) {
-            await loadExternalScript(
-                AUTOTABLE_URL,
-                'ytb-payment-attestation-autotable'
-            );
-        }
-
-        if (
-            !window.jspdf?.jsPDF?.API
-                ?.autoTable
-        ) {
-            throw new Error(
-                'jsPDF AutoTable n’est pas disponible.'
-            );
-        }
-
-        return window.jspdf;
-    }
-
-    function loadExternalScript(
-        src,
-        id
-    ) {
-        return new Promise(
-            (resolve, reject) => {
-                const existing =
-                    document.getElementById(
-                        id
-                    );
-
-                if (existing) {
-                    if (
-                        existing.dataset
-                            .loaded ===
-                        'true'
-                    ) {
-                        resolve();
-                        return;
-                    }
-
-                    existing.addEventListener(
-                        'load',
-                        resolve,
-                        {
-                            once: true,
-                        }
-                    );
-
-                    existing.addEventListener(
-                        'error',
-                        () =>
-                            reject(
-                                new Error(
-                                    `Impossible de charger ${src}`
-                                )
-                            ),
-                        {
-                            once: true,
-                        }
-                    );
-
-                    return;
-                }
-
-                const script =
-                    document.createElement(
-                        'script'
-                    );
-
-                script.id = id;
-                script.src = src;
-                script.async = true;
-
-                script.addEventListener(
-                    'load',
-                    () => {
-                        script.dataset.loaded =
-                            'true';
-
-                        resolve();
-                    },
-                    {
-                        once: true,
-                    }
-                );
-
-                script.addEventListener(
-                    'error',
-                    () =>
-                        reject(
-                            new Error(
-                                `Impossible de charger ${src}`
-                            )
-                        ),
-                    {
-                        once: true,
-                    }
-                );
-
-                document.head.appendChild(
-                    script
-                );
-            }
-        );
-    }
-
-    /*
-     * ============================================================
-     * YAPLA SIDE
-     * ============================================================
-     */
-
-    async function runOnYapla() {
-        installYaplaMessageListener();
-
-        const existingJob =
-            getJob();
-
-        if (
-            existingJob &&
-            existingJob.invoice?.billingId ===
-                currentBillingId() &&
-            ![
-                'completed',
-                'cancelled',
-            ].includes(
-                existingJob.status
-            )
-        ) {
-            renderYaplaStatus(
-                existingJob
-            );
-
-            if (
-                existingJob.status ===
-                'stripeDataReady'
-            ) {
-                handleStripeDataReady(
-                    existingJob
-                );
-            }
-
-            return;
-        }
-
-        startFromYapla();
-    }
-
-    function currentBillingId() {
-        return (
-            location.pathname.match(
-                /billingId\/(\d+)/i
-            )?.[1] || ''
-        );
-    }
+    // ============================================================
+    // YAPLA SCRAPE
+    // ============================================================
 
     function readYaplaConfig() {
         try {
             return JSON.parse(
-                document
-                    .querySelector(
-                        '#js-config'
-                    )
-                    ?.textContent.trim() ||
+                document.querySelector(
+                    '#js-config'
+                )?.textContent ||
                     '{}'
             );
         } catch {
@@ -1155,46 +684,14 @@
         }
     }
 
-    function findHeaderIndex(
-        headers,
-        alternatives
-    ) {
-        return headers.findIndex(
-            header =>
-                alternatives.some(
-                    needle =>
-                        header.includes(
-                            needle
-                        )
-                )
-        );
-    }
-
-    function readCell(
-        cells,
-        index
-    ) {
-        return (
-            index >= 0 &&
-            cells[index]
-        )
-            ? cleanText(
-                cells[index]
-                    .textContent
-            )
-            : '';
-    }
-
-    function readInvoiceNumberFromPage() {
+    function readInvoiceNumber() {
         const candidates = [
             textOf(
                 '[data-component="page-heading"] h3 span'
             ),
-
             textOf(
                 '[data-component="page-heading"] h3'
             ),
-
             textOf(
                 '.appli-header-light h3'
             ),
@@ -1206,7 +703,7 @@
         ) {
             const match =
                 candidate.match(
-                    /(?:facture|invoice)\s*(?:n(?:o|umero)?|number)?\s*[°º#.:\-]*\s*(\d{3,})/i
+                    /(?:facture|invoice)\s*(?:n(?:o|umero)?|number)?\s*[°º#.:_-]*\s*(\d{3,})/i
                 );
 
             if (match) {
@@ -1218,19 +715,16 @@
     }
 
     function scrapePayments(
-        pageInvoiceNumber = ''
+        invoiceNumber
     ) {
-        const tables =
+        const table =
             [
                 ...document.querySelectorAll(
                     '#payment_info table'
                 ),
-            ];
-
-        const table =
-            tables.find(
-                candidate =>
-                    candidate.querySelector(
+            ].find(
+                element =>
+                    element.querySelector(
                         'tbody tr'
                     )
             );
@@ -1245,34 +739,39 @@
                     'thead th'
                 ),
             ].map(
-                th =>
+                cell =>
                     normalizeKey(
-                        th.getAttribute(
+                        cell.getAttribute(
                             'aria-label'
                         ) ||
-                        th.textContent
+                        cell.textContent
                     )
             );
 
-        const resolveIndex =
+        const findIndex =
             (
                 alternatives,
                 fallback
             ) => {
-                const found =
-                    findHeaderIndex(
-                        headers,
-                        alternatives
+                const index =
+                    headers.findIndex(
+                        header =>
+                            alternatives.some(
+                                alternative =>
+                                    header.includes(
+                                        alternative
+                                    )
+                            )
                     );
 
-                return found >= 0
-                    ? found
+                return index >= 0
+                    ? index
                     : fallback;
             };
 
         const indexes = {
             date:
-                resolveIndex(
+                findIndex(
                     [
                         'date du paiement',
                         'payment date',
@@ -1280,14 +779,8 @@
                     0
                 ),
 
-            source:
-                resolveIndex(
-                    ['source'],
-                    1
-                ),
-
-            invoiceNumber:
-                resolveIndex(
+            invoice:
+                findIndex(
                     [
                         'n de facture',
                         'numero de facture',
@@ -1296,8 +789,8 @@
                     2
                 ),
 
-            paymentNumber:
-                resolveIndex(
+            payment:
+                findIndex(
                     [
                         'n de paiement',
                         'numero de paiement',
@@ -1307,7 +800,7 @@
                 ),
 
             method:
-                resolveIndex(
+                findIndex(
                     [
                         'methode de paiement',
                         'payment method',
@@ -1316,7 +809,7 @@
                 ),
 
             thirdParty:
-                resolveIndex(
+                findIndex(
                     [
                         'info de paiement tiers',
                         'third party payment',
@@ -1325,7 +818,7 @@
                 ),
 
             status:
-                resolveIndex(
+                findIndex(
                     [
                         'statut',
                         'status',
@@ -1334,7 +827,7 @@
                 ),
 
             total:
-                resolveIndex(
+                findIndex(
                     [
                         'montant total',
                         'total amount',
@@ -1343,13 +836,24 @@
                 ),
         };
 
+        const read =
+            (cells, index) =>
+                cleanText(
+                    cells[index]
+                        ?.textContent ||
+                        ''
+                );
+
         return [
             ...table.querySelectorAll(
                 'tbody tr'
             ),
         ]
             .map(
-                (row, rowIndex) => {
+                (
+                    row,
+                    rowIndex
+                ) => {
                     const cells =
                         [
                             ...row.querySelectorAll(
@@ -1362,7 +866,7 @@
                             'a[href*="/payment/view/paymentId/"]'
                         );
 
-                    const linkPaymentId =
+                    const paymentId =
                         paymentLink
                             ?.getAttribute(
                                 'href'
@@ -1373,7 +877,7 @@
                         '';
 
                     const totalText =
-                        readCell(
+                        read(
                             cells,
                             indexes.total
                         );
@@ -1382,48 +886,39 @@
                         rowIndex,
 
                         date:
-                            readCell(
+                            read(
                                 cells,
                                 indexes.date
                             ),
 
-                        source:
-                            readCell(
-                                cells,
-                                indexes.source
-                            ),
-
                         invoiceNumber:
-                            readCell(
+                            read(
                                 cells,
-                                indexes
-                                    .invoiceNumber
+                                indexes.invoice
                             ) ||
-                            pageInvoiceNumber,
+                            invoiceNumber,
 
                         paymentNumber:
-                            readCell(
+                            read(
                                 cells,
-                                indexes
-                                    .paymentNumber
+                                indexes.payment
                             ) ||
-                            linkPaymentId,
+                            paymentId,
 
                         method:
-                            readCell(
+                            read(
                                 cells,
                                 indexes.method
                             ),
 
                         thirdParty:
-                            readCell(
+                            read(
                                 cells,
-                                indexes
-                                    .thirdParty
+                                indexes.thirdParty
                             ),
 
                         status:
-                            readCell(
+                            read(
                                 cells,
                                 indexes.status
                             ),
@@ -1439,9 +934,7 @@
             )
             .filter(
                 payment =>
-                    payment.paymentNumber ||
-                    payment.invoiceNumber ||
-                    payment.date
+                    payment.paymentNumber
             );
     }
 
@@ -1481,12 +974,10 @@
                 continue;
             }
 
-            const firstCell =
-                cells[0];
-
-            const firstText =
+            const first =
                 cleanText(
-                    firstCell.textContent
+                    cells[0]
+                        .textContent
                 );
 
             const amountText =
@@ -1497,11 +988,13 @@
                 );
 
             const isGroup =
-                firstCell.classList.contains(
-                    'table-description-subtitle'
-                ) ||
+                cells[0]
+                    .classList
+                    .contains(
+                        'table-description-subtitle'
+                    ) ||
                 (
-                    firstText &&
+                    first &&
                     cells
                         .slice(1)
                         .every(
@@ -1514,20 +1007,18 @@
 
             if (isGroup) {
                 currentGroup =
-                    firstText;
-
+                    first;
                 continue;
             }
 
-            const parsedAmount =
+            const amount =
                 parseMoney(
                     amountText
-                );
+                ).amount;
 
             if (
-                !firstText &&
-                parsedAmount.amount ===
-                    null
+                !first &&
+                amount === null
             ) {
                 continue;
             }
@@ -1537,21 +1028,19 @@
                     currentGroup,
 
                 description:
-                    firstText,
+                    first,
 
                 fullDescription:
                     [
                         currentGroup,
-                        firstText,
+                        first,
                     ]
                         .filter(Boolean)
                         .join(' - ') ||
                     'Transaction',
 
+                amount,
                 amountText,
-
-                amount:
-                    parsedAmount.amount,
             });
         }
 
@@ -1571,7 +1060,7 @@
                             ''
                         );
 
-                    const valueText =
+                    const value =
                         cleanText(
                             row.querySelector(
                                 '.billing-tax-value'
@@ -1582,11 +1071,10 @@
 
                     return {
                         label,
-                        amountText:
-                            valueText,
+
                         amount:
                             parseMoney(
-                                valueText
+                                value
                             ).amount,
                     };
                 })
@@ -1629,17 +1117,17 @@
                 );
 
         const invoiceTotal =
-            totalElement?.dataset.bill
+            totalElement?.dataset
+                .bill
                 ? Number(
-                    totalElement.dataset
+                    totalElement
+                        .dataset
                         .bill
                 )
                 : parseMoney(
-                    cleanText(
-                        totalElement
-                            ?.textContent ||
-                        ''
-                    )
+                    totalElement
+                        ?.textContent ||
+                    ''
                 ).amount;
 
         return {
@@ -1650,24 +1138,21 @@
         };
     }
 
-    function scrapeYaplaInvoice() {
+    function scrapeInvoice() {
         const config =
             readYaplaConfig();
 
         const lines =
             scrapeInvoiceLines();
 
+        const invoiceNumber =
+            readInvoiceNumber();
+
         const currency =
             normalizeCurrency(
                 config.companyCurrency ||
-                document.body.className.match(
-                    /currency-([a-z]{3})/i
-                )?.[1] ||
-                'CAD'
+                    'CAD'
             );
-
-        const invoiceNumber =
-            readInvoiceNumberFromPage();
 
         return {
             sourceUrl:
@@ -1677,11 +1162,6 @@
                 currentBillingId(),
 
             invoiceNumber,
-
-            companyId:
-                cleanText(
-                    config.id
-                ),
 
             companyName:
                 cleanText(
@@ -1764,256 +1244,154 @@
         };
     }
 
-    function buildYaplaWarnings(
-        invoice,
-        payment
-    ) {
-        const warnings = [];
+    // ============================================================
+    // START
+    // ============================================================
 
-        if (!invoice.companyName) {
-            warnings.push(
-                "Le nom de l'association n'a pas été détecté."
+    function start() {
+        const invoice =
+            scrapeInvoice();
+
+        if (
+            !invoice.payments.length
+        ) {
+            alert(
+                'Aucun paiement détecté sur cette facture.'
             );
+            return;
         }
 
         if (
-            !invoice.address.address ||
-            !invoice.address.city ||
-            !invoice.address.zip ||
-            !invoice.address.country
+            invoice.payments.length ===
+            1
         ) {
-            warnings.push(
-                "L'adresse de facturation est incomplète."
+            openStripe(
+                invoice,
+                invoice.payments[0]
             );
+
+            return;
         }
 
-        if (!invoice.items.length) {
-            warnings.push(
-                "Aucune ligne de facture n'a été détectée."
-            );
-        }
-
-        if (
-            !Number.isFinite(
-                invoice.invoiceTotal
-            )
-        ) {
-            warnings.push(
-                "Le total de la facture n'a pas été détecté."
-            );
-        }
-
-        if (
-            !(
-                payment.invoiceNumber ||
-                invoice.invoiceNumber
-            )
-        ) {
-            warnings.push(
-                "Le numéro de facture n'a pas été détecté."
-            );
-        }
-
-        if (!payment.date) {
-            warnings.push(
-                "La date du paiement n'a pas été détectée."
-            );
-        }
-
-        if (
-            !/accepte|accepted|succeeded|reussi/i.test(
-                normalizeKey(
-                    payment.status
-                )
-            )
-        ) {
-            warnings.push(
-                `Le paiement Yapla n'est pas indiqué comme accepté : ${
-                    payment.status ||
-                    'statut inconnu'
-                }.`
-            );
-        }
-
-        return warnings;
+        choosePayment(
+            invoice
+        );
     }
 
-    function paymentChoiceHtml(
-        payments
-    ) {
-        return payments
-            .map(
-                (
-                    payment,
-                    index
-                ) => `
-                    <label class="ya-option">
-                        <input
-                            type="radio"
-                            name="ya-payment"
-                            value="${index}"
-                        >
+    function choosePayment(invoice) {
+        const html =
+            invoice.payments
+                .map(
+                    (
+                        payment,
+                        index
+                    ) => `
+                        <label class="option">
+                            <input
+                                type="radio"
+                                name="ytb-pa-payment"
+                                value="${index}"
+                            >
 
-                        <span>
-                            <span class="ya-option-title">
+                            <strong>
                                 ${escapeHtml(
                                     payment.date ||
                                     'Date inconnue'
                                 )}
-                                - Paiement
+                                -
+                                Paiement
                                 ${escapeHtml(
-                                    payment.paymentNumber ||
-                                    'inconnu'
+                                    payment.paymentNumber
+                                )}
+                            </strong>
+
+                            <span class="details">
+                                Facture :
+                                ${escapeHtml(
+                                    payment.invoiceNumber ||
+                                    invoice.invoiceNumber
+                                )}
+                                <br>
+
+                                ${escapeHtml(
+                                    payment.method ||
+                                    ''
+                                )}
+
+                                ${payment.thirdParty
+                                    ? ` - ${escapeHtml(
+                                        payment.thirdParty
+                                    )}`
+                                    : ''
+                                }
+
+                                <br>
+
+                                ${escapeHtml(
+                                    payment.status ||
+                                    ''
+                                )}
+                                -
+                                ${escapeHtml(
+                                    payment.totalText ||
+                                    ''
                                 )}
                             </span>
-
-                            <span class="ya-option-details">
-Facture : ${escapeHtml(payment.invoiceNumber || 'inconnue')}
-${escapeHtml(payment.method || 'Méthode inconnue')}
-${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalText || 'Montant inconnu')}
-                            </span>
-                        </span>
-                    </label>
-                `
-            )
-            .join('');
-    }
-
-    function startFromYapla() {
-        try {
-            const invoice =
-                scrapeYaplaInvoice();
-
-            if (
-                !invoice.payments.length
-            ) {
-                showModal({
-                    title:
-                        'Aucun paiement détecté',
-
-                    bodyHtml: `
-                        <div class="ya-warning-box">
-                            La section Paiements ne contient
-                            aucun paiement exploitable.
-                        </div>
-                    `,
-
-                    confirmText:
-                        'Fermer',
-
-                    onConfirm:
-                        removeModal,
-                });
-
-                return;
-            }
-
-            if (
-                invoice.payments.length ===
-                1
-            ) {
-                openStripeForPayment(
-                    invoice,
-                    invoice.payments[0]
-                );
-
-                return;
-            }
-
-            const modal =
-                showModal({
-                    title:
-                        'Sélectionnez le paiement',
-
-                    subtitle:
-                        `Cette facture contient ${invoice.payments.length} paiements.`,
-
-                    bodyHtml:
-                        paymentChoiceHtml(
-                            invoice.payments
-                        ),
-
-                    confirmText:
-                        'Ouvrir Stripe',
-
-                    confirmDisabled:
-                        true,
-
-                    onConfirm:
-                        ({
-                            overlay,
-                        }) => {
-                            const selected =
-                                overlay.querySelector(
-                                    'input[name="ya-payment"]:checked'
-                                );
-
-                            if (!selected) {
-                                return;
-                            }
-
-                            openStripeForPayment(
-                                invoice,
-                                invoice.payments[
-                                    Number(
-                                        selected.value
-                                    )
-                                ]
-                            );
-                        },
-                });
-
-            modal.overlay
-                .querySelectorAll(
-                    'input[name="ya-payment"]'
+                        </label>
+                    `
                 )
-                .forEach(
-                    radio => {
-                        radio.addEventListener(
-                            'change',
-                            () => {
-                                modal.confirmButton.disabled =
-                                    false;
-                            }
-                        );
-                    }
+                .join('');
+
+        showModal({
+            title:
+                'Choisir le paiement',
+
+            body:
+                html,
+
+            confirmText:
+                'Ouvrir Stripe',
+
+            onConfirm(modal) {
+                const selected =
+                    modal.querySelector(
+                        'input[name="ytb-pa-payment"]:checked'
+                    );
+
+                if (!selected) {
+                    alert(
+                        'Choisis un paiement.'
+                    );
+                    return;
+                }
+
+                removeModal();
+
+                openStripe(
+                    invoice,
+                    invoice.payments[
+                        Number(
+                            selected.value
+                        )
+                    ]
                 );
-        } catch (error) {
-            console.error(
-                '[Attestation Yapla]',
-                error
-            );
-
-            showModal({
-                title:
-                    'Erreur de lecture',
-
-                bodyHtml: `
-                    <div class="ya-warning-box">
-                        ${escapeHtml(
-                            error.message ||
-                            String(error)
-                        )}
-                    </div>
-                `,
-
-                confirmText:
-                    'Fermer',
-
-                onConfirm:
-                    removeModal,
-            });
-        }
+            },
+        });
     }
 
-    function openStripeForPayment(
+    // ============================================================
+    // OPEN STRIPE
+    // ============================================================
+
+    function openStripe(
         invoice,
         payment
     ) {
         const server =
-            location.hostname.startsWith(
-                's2.'
-            )
+            location.hostname
+                .startsWith(
+                    's2.'
+                )
                 ? 's2'
                 : 's1';
 
@@ -2022,27 +1400,23 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
                 server
             ];
 
-        const selectedPayment = {
-            ...payment,
+        const paymentNumber =
+            String(
+                payment.paymentNumber ||
+                ''
+            );
 
-            invoiceNumber:
-                payment.invoiceNumber ||
-                invoice.invoiceNumber ||
-                '',
-        };
-
-        const searchUrl =
+        const stripeSearchUrl =
             `https://dashboard.stripe.com/${stripeAccount}/search?query=` +
             encodeURIComponent(
-                selectedPayment
-                    .paymentNumber
+                paymentNumber
             );
 
         const job = {
-            version: 1,
+            version: 2,
 
             jobId:
-                `ytb-ya-${Date.now()}-${Math.random()
+                `ytb-pa-${Date.now()}-${Math.random()
                     .toString(36)
                     .slice(2, 8)}`,
 
@@ -2055,173 +1429,70 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
             status:
                 'awaitingStripe',
 
-            yaplaOrigin:
-                location.origin,
-
-            yaplaUrl:
-                location.href,
-
             stripeAccount,
-
-            stripeSearchUrl:
-                searchUrl,
+            stripeSearchUrl,
 
             invoice,
-            selectedPayment,
+
+            selectedPayment: {
+                ...payment,
+
+                invoiceNumber:
+                    payment.invoiceNumber ||
+                    invoice.invoiceNumber,
+            },
+
+            stripe:
+                null,
 
             warnings:
-                buildYaplaWarnings(
-                    invoice,
-                    selectedPayment
-                ),
-
-            stripe: null,
+                [],
         };
 
         saveJob(job);
 
-        removeModal();
+        showStatus(
+            `Stripe ouvert pour le paiement ${paymentNumber}. ` +
+            `Clique maintenant le même bookmarklet dans l'onglet Stripe.`
+        );
 
+        /*
+         * IMPORTANT:
+         * pas de noopener.
+         *
+         * Le bookmarklet Stripe renverra ensuite
+         * le résultat avec window.opener.postMessage().
+         */
         const stripeWindow =
             window.open(
-                searchUrl,
+                stripeSearchUrl,
                 '_blank'
             );
 
-        /*
-         * Do not rely entirely on window.opener.
-         * Stripe may isolate the browsing context.
-         */
-        job.stripeWindowOpened =
-            Boolean(stripeWindow);
+        if (!stripeWindow) {
+            job.status =
+                'error';
 
-        saveJob(job);
+            saveJob(job);
 
-        renderYaplaStatus(job);
-    }
-
-    function renderYaplaStatus(job) {
-        const actions = [];
-
-        actions.push({
-            label:
-                'Ouvrir Stripe',
-
-            href:
-                job.selectedStripeUrl ||
-                job.stripeSearchUrl,
-        });
-
-        if (
-            job.status ===
-            'stripeDataReady'
-        ) {
-            actions.push({
-                label:
-                    'Générer le PDF',
-
-                onClick:
-                    () =>
-                        showFinalConfirmation(
-                            getJob() ||
-                            job
-                        ),
-            });
-        }
-
-        actions.push({
-            label:
-                'Annuler',
-
-            onClick:
-                cancelJob,
-        });
-
-        const statusText =
-            {
-                awaitingStripe:
-                    'Stripe est ouvert. Dans l’onglet Stripe, ouvre le bookmark Yapla Toolbox puis lance « Attestation de paiement ».',
-
-                stripeSearching:
-                    'Stripe analyse actuellement le paiement.',
-
-                stripeDataReady:
-                    'Les données Stripe ont été reçues. Le PDF peut maintenant être généré.',
-
-                generatingPdf:
-                    'Création du PDF…',
-
-                completed:
-                    'PDF généré.',
-
-                error:
-                    job.errorMessage ||
-                    'Une erreur est survenue.',
-            }[job.status] ||
-            job.status;
-
-        const box =
-            showStatus(
-                'Attestation de paiement',
-                statusText,
-                actions
-            );
-
-        if (
-            job.status ===
-            'awaitingStripe'
-        ) {
-            const warning =
-                document.createElement(
-                    'div'
-                );
-
-            warning.className =
-                'ya-warning';
-
-            warning.innerHTML = `
-                <strong>Étape Stripe</strong><br>
-                Une fois Stripe ouvert :
-
-                <br><br>
-
-                1. Clique sur ton bookmark Yapla Toolbox.<br>
-                2. Choisis « Attestation de paiement ».<br>
-                3. Laisse l’onglet Stripe ouvert pendant l’analyse.
-            `;
-
-            box.appendChild(
-                warning
+            alert(
+                'Le navigateur a bloqué l’ouverture de Stripe.'
             );
         }
     }
 
-    function cancelJob() {
-        deleteJob();
+    // ============================================================
+    // STRIPE RESULT
+    // ============================================================
 
-        document
-            .getElementById(
-                IDS.status
-            )
-            ?.remove();
-
-        removeModal();
-    }
-
-    /*
-     * ============================================================
-     * CROSS DOMAIN MESSAGE
-     * ============================================================
-     */
-
-    function installYaplaMessageListener() {
+    function installStripeResultListener() {
         if (
-            window.__ytbPaymentAttestationMessageListener
+            window.__ytbPaymentAttestationV2Listener
         ) {
             return;
         }
 
-        window.__ytbPaymentAttestationMessageListener =
+        window.__ytbPaymentAttestationV2Listener =
             true;
 
         window.addEventListener(
@@ -2239,8 +1510,10 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
 
                 if (
                     !data ||
+                    data.source !==
+                        'yapla-toolbox-stripe' ||
                     data.type !==
-                        'ytb-payment-attestation-stripe-result'
+                        'YTB_PAYMENT_ATTESTATION_STRIPE_RESULT'
                 ) {
                     return;
                 }
@@ -2258,959 +1531,133 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
                         data.paymentNumber
                     ) !==
                         String(
-                            job.selectedPayment
+                            job
+                                .selectedPayment
                                 .paymentNumber
                         )
                 ) {
                     console.warn(
-                        '[Attestation Yapla] Résultat Stripe ignoré, mauvais numéro de paiement.'
+                        '[Attestation] Mauvais paiement Stripe reçu.'
                     );
+                    return;
+                }
 
+                if (
+                    !data.stripe
+                ) {
                     return;
                 }
 
                 job.stripe =
                     data.stripe;
 
-                job.selectedStripeUrl =
-                    data.stripe
-                        ?.paymentUrl ||
-                    '';
-
-                job.warnings =
-                    buildStripeWarnings(
-                        job,
-                        data.stripe
-                    );
-
                 job.status =
                     'stripeDataReady';
 
-                job.errorMessage =
-                    '';
+                job.warnings =
+                    buildWarnings(
+                        job
+                    );
 
                 saveJob(job);
 
-                renderYaplaStatus(
-                    job
-                );
-
-                handleStripeDataReady(
+                processStripeResult(
                     job
                 );
             }
         );
-
-        window.addEventListener(
-            'storage',
-            event => {
-                if (
-                    event.key !==
-                    STORAGE_KEY ||
-                    !event.newValue
-                ) {
-                    return;
-                }
-
-                try {
-                    const job =
-                        JSON.parse(
-                            event.newValue
-                        );
-
-                    if (
-                        job.invoice
-                            ?.billingId ===
-                        currentBillingId()
-                    ) {
-                        renderYaplaStatus(
-                            job
-                        );
-                    }
-                } catch {}
-            }
-        );
     }
 
-    function handleStripeDataReady(
-        job
-    ) {
-        const warnings =
-            Array.isArray(
-                job.warnings
-            )
-                ? job.warnings
-                : [];
+    function buildWarnings(job) {
+        const warnings = [];
 
-        if (!warnings.length) {
-            generateAutomatically(
-                job
-            );
+        const invoice =
+            job.invoice;
 
-            return;
-        }
-
-        showFinalConfirmation(
-            job
-        );
-    }
-
-    /*
-     * ============================================================
-     * STRIPE SIDE
-     * ============================================================
-     */
-
-    async function runOnStripe() {
-        const paymentNumber =
-            getStripePaymentNumber();
-
-        const stripeAccount =
-            getStripeAccount();
-
-        let session =
-            getStripeSession();
-
-        if (
-            !session ||
-            session.paymentNumber !==
-                paymentNumber
-        ) {
-            session = {
-                createdAt:
-                    Date.now(),
-
-                paymentNumber,
-
-                stripeAccount,
-            };
-
-            saveStripeSession(
-                session
-            );
-        }
-
-        if (
-            !session.paymentNumber
-        ) {
-            showStatus(
-                'Attestation de paiement',
-                'Impossible de déterminer le numéro de paiement. Ouvre d’abord Stripe depuis la facture Yapla.'
-            );
-
-            return;
-        }
-
-        showStatus(
-            'Attestation de paiement',
-            `Recherche Stripe pour le paiement ${session.paymentNumber}…`
-        );
-
-        if (
-            isStripePaymentPage()
-        ) {
-            await processStripeDetail(
-                session
-            );
-
-            return;
-        }
-
-        await processStripeSearch(
-            session
-        );
-    }
-
-    function getStripePaymentNumber() {
-        const query =
-            new URLSearchParams(
-                location.search
-            ).get('query');
-
-        if (query) {
-            return cleanText(
-                query
-            );
-        }
-
-        return (
-            getStripeSession()
-                ?.paymentNumber ||
-            ''
-        );
-    }
-
-    function getStripeAccount() {
-        return (
-            location.pathname.match(
-                /\/(acct_[A-Za-z0-9]+)\//
-            )?.[1] ||
-            getStripeSession()
-                ?.stripeAccount ||
-            ''
-        );
-    }
-
-    function isStripePaymentPage() {
-        return /\/payments\/(?:pi|py|ch)_[A-Za-z0-9]+/i.test(
-            location.pathname
-        );
-    }
-
-    async function processStripeSearch(
-        session
-    ) {
-        const results =
-            await waitForStripeResults(
-                60000
-            );
-
-        if (!results.length) {
-            showStatus(
-                'Paiement Stripe introuvable',
-                `Aucun résultat n’a été détecté pour ${session.paymentNumber}.`
-            );
-
-            return;
-        }
-
-        if (
-            results.length === 1
-        ) {
-            const result =
-                results[0];
-
-            session.paymentUrl =
-                result.url;
-
-            saveStripeSession(
-                session
-            );
-
-            /*
-             * Prefer SPA click so our toolbox code survives.
-             */
-            if (
-                result.anchor &&
-                result.anchor.isConnected
-            ) {
-                result.anchor.click();
-
-                await waitFor(
-                    () =>
-                        isStripePaymentPage(),
-                    {
-                        timeout:
-                            15000,
-                    }
-                ).catch(
-                    () => null
-                );
-
-                if (
-                    isStripePaymentPage()
-                ) {
-                    await processStripeDetail(
-                        session
-                    );
-
-                    return;
-                }
-            }
-
-            /*
-             * Fallback.
-             *
-             * A full navigation can destroy the injected Toolbox.
-             * sessionStorage preserves the search data, so the user
-             * can simply reopen the Toolbox on the detail page.
-             */
-            location.href =
-                result.url;
-
-            return;
-        }
-
-        showStripeSelection(
-            results,
-            session
-        );
-    }
-
-    function collectStripeSearchResults() {
-        const candidates = [];
-        const seen = new Set();
-
-        const anchors =
-            [
-                ...document.querySelectorAll(
-                    'a[href*="/payments/"]'
-                ),
-            ];
-
-        for (
-            const anchor
-            of anchors
-        ) {
-            let url;
-
-            try {
-                url =
-                    new URL(
-                        anchor.getAttribute(
-                            'href'
-                        ),
-                        location.origin
-                    ).href;
-            } catch {
-                continue;
-            }
-
-            if (
-                !/\/payments\/(?:pi|py|ch)_/i.test(
-                    url
-                )
-            ) {
-                continue;
-            }
-
-            if (seen.has(url)) {
-                continue;
-            }
-
-            seen.add(url);
-
-            const container =
-                anchor.closest(
-                    'tr,[role="row"],li'
-                ) ||
-                anchor.parentElement;
-
-            const result = {
-                url,
-
-                summary:
-                    cleanText(
-                        container?.innerText ||
-                        container
-                            ?.textContent ||
-                        anchor.textContent
-                    ),
-            };
-
-            Object.defineProperty(
-                result,
-                'anchor',
-                {
-                    value: anchor,
-                    enumerable:
-                        false,
-                }
-            );
-
-            candidates.push(
-                result
-            );
-        }
-
-        return candidates;
-    }
-
-    async function waitForStripeResults(
-        timeout
-    ) {
-        const started =
-            Date.now();
-
-        while (
-            Date.now() -
-                started <
-            timeout
-        ) {
-            const results =
-                collectStripeSearchResults();
-
-            if (results.length) {
-                /*
-                 * Give React a moment to finish rendering.
-                 */
-                await delay(350);
-
-                const stable =
-                    collectStripeSearchResults();
-
-                return stable.length
-                    ? stable
-                    : results;
-            }
-
-            await delay(250);
-        }
-
-        return [];
-    }
-
-    function showStripeSelection(
-        results,
-        session
-    ) {
-        const html =
-            results
-                .map(
-                    (
-                        result,
-                        index
-                    ) => `
-                        <label class="ya-option">
-                            <input
-                                type="radio"
-                                name="ya-stripe-result"
-                                value="${index}"
-                            >
-
-                            <span>
-                                <span class="ya-option-title">
-                                    Résultat Stripe ${index + 1}
-                                </span>
-
-                                <span class="ya-option-details">
-                                    ${escapeHtml(
-                                        result.summary ||
-                                        result.url
-                                    )}
-                                </span>
-                            </span>
-                        </label>
-                    `
-                )
-                .join('');
-
-        const modal =
-            showModal({
-                title:
-                    'Plusieurs paiements Stripe trouvés',
-
-                subtitle:
-                    `Choisis le paiement ${session.paymentNumber}.`,
-
-                bodyHtml:
-                    html,
-
-                confirmText:
-                    'Ouvrir ce paiement',
-
-                confirmDisabled:
-                    true,
-
-                onConfirm:
-                    ({
-                        overlay,
-                    }) => {
-                        const selected =
-                            overlay.querySelector(
-                                'input[name="ya-stripe-result"]:checked'
-                            );
-
-                        if (!selected) {
-                            return;
-                        }
-
-                        const result =
-                            results[
-                                Number(
-                                    selected.value
-                                )
-                            ];
-
-                        session.paymentUrl =
-                            result.url;
-
-                        saveStripeSession(
-                            session
-                        );
-
-                        removeModal();
-
-                        if (
-                            result.anchor &&
-                            result.anchor
-                                .isConnected
-                        ) {
-                            result.anchor.click();
-                        } else {
-                            location.href =
-                                result.url;
-                        }
-                    },
-            });
-
-        modal.overlay
-            .querySelectorAll(
-                'input[name="ya-stripe-result"]'
-            )
-            .forEach(
-                radio => {
-                    radio.addEventListener(
-                        'change',
-                        () => {
-                            modal.confirmButton.disabled =
-                                false;
-                        }
-                    );
-                }
-            );
-    }
-
-    async function processStripeDetail(
-        session
-    ) {
-        showStatus(
-            'Lecture du paiement Stripe',
-            'Recherche du total, des frais d’application et du statut…'
-        );
+        const payment =
+            job.selectedPayment;
 
         const stripe =
-            await waitForStripeDetails(
-                session,
-                60000
-            );
+            job.stripe;
 
-        if (!stripe) {
-            showStatus(
-                'Lecture Stripe incomplète',
-                'Les montants Stripe n’ont pas pu être détectés.'
-            );
-
-            return;
-        }
-
-        const sent =
-            sendStripeResultToYapla(
-                session,
-                stripe
-            );
-
-        if (sent) {
-            showStatus(
-                'Données Stripe envoyées',
-                'Retourne sur la facture Yapla. Le PDF va être généré depuis Yapla.'
-            );
-        } else {
-            showStatus(
-                'Retour Yapla requis',
-                'L’onglet Yapla d’origine n’est plus accessible. Retourne sur la facture Yapla et relance l’attestation.'
-            );
-        }
-    }
-
-    function findExactTextElements(
-        labels
-    ) {
-        const wanted =
-            new Set(
-                labels.map(
-                    normalizeKey
+        if (
+            !Number.isFinite(
+                Number(
+                    invoice.invoiceTotal
                 )
-            );
-
-        return [
-            ...document.querySelectorAll(
-                'div,span,dt,th,p'
-            ),
-        ].filter(
-            element => {
-                const text =
-                    normalizeKey(
-                        element.textContent
-                    );
-
-                return (
-                    text &&
-                    wanted.has(text) &&
-                    element.children
-                        .length <= 3
-                );
-            }
-        );
-    }
-
-    function extractMoneyNearLabels(
-        labels
-    ) {
-        const labelElements =
-            findExactTextElements(
-                labels
-            );
-
-        for (
-            const labelElement
-            of labelElements
-        ) {
-            let container =
-                labelElement.parentElement;
-
-            for (
-                let depth = 0;
-                depth < 6 &&
-                container;
-                depth += 1,
-                container =
-                    container.parentElement
-            ) {
-                const containerText =
-                    cleanText(
-                        container.innerText ||
-                        container.textContent
-                    );
-
-                const withoutLabel =
-                    containerText
-                        .replace(
-                            cleanText(
-                                labelElement
-                                    .textContent
-                            ),
-                            ' '
-                        )
-                        .trim();
-
-                const matches =
-                    withoutLabel.match(
-                        /(?:[$€£]\s*)?[-+]?\d[\d\s.,'’]*(?:\s*(?:CAD|USD|EUR|GBP))?/gi
-                    ) || [];
-
-                const parsed =
-                    matches
-                        .map(parseMoney)
-                        .filter(
-                            item =>
-                                item.amount !==
-                                null
-                        );
-
-                if (parsed.length) {
-                    return (
-                        parsed.find(
-                            item =>
-                                item.currency
-                        ) ||
-                        parsed[0]
-                    );
-                }
-            }
-        }
-
-        return {
-            amount: null,
-            currency: '',
-            original: '',
-        };
-    }
-
-    function detectStripeStatus() {
-        const page =
-            normalizeKey(
-                document.body
-                    .innerText ||
-                document.body
-                    .textContent
-            );
-
-        if (
-            page.includes(
-                'partially refunded'
-            ) ||
-            page.includes(
-                'partiellement rembourse'
             )
         ) {
-            return 'Partiellement remboursé';
+            warnings.push(
+                'Le total Yapla n’a pas été détecté.'
+            );
         }
 
         if (
-            page.includes(
-                'refunded'
-            ) ||
-            page.includes(
-                'rembourse'
-            )
-        ) {
-            return 'Remboursé';
-        }
-
-        if (
-            page.includes(
-                'succeeded'
-            ) ||
-            page.includes(
-                'reussi'
-            )
-        ) {
-            return 'Succeeded';
-        }
-
-        if (
-            page.includes(
-                'failed'
-            ) ||
-            page.includes(
-                'echoue'
-            )
-        ) {
-            return 'Failed';
-        }
-
-        return '';
-    }
-
-    function scrapeStripeDetails(
-        session
-    ) {
-        const fee =
-            extractMoneyNearLabels([
-                'Application fee',
-                "Frais d'application",
-                'Frais d’application',
-                "Commission de l'application",
-            ]);
-
-        const total =
-            extractMoneyNearLabels([
-                'Amount details',
-                'Détails du montant',
-                'Détail du montant',
-            ]);
-
-        const status =
-            detectStripeStatus();
-
-        const bodyKey =
-            normalizeKey(
-                document.body
-                    .innerText ||
-                document.body
-                    .textContent
-            );
-
-        return {
-            paymentUrl:
-                location.href,
-
-            paymentIntentId:
-                location.pathname.match(
-                    /\/payments\/((?:pi|py|ch)_[A-Za-z0-9]+)/
-                )?.[1] ||
-                '',
-
-            paymentNumber:
-                session.paymentNumber,
-
-            feeAmount:
-                fee.amount,
-
-            feeText:
-                fee.original,
-
-            feeCurrency:
-                normalizeCurrency(
-                    fee.currency,
-                    'CAD'
-                ),
-
-            totalAmount:
-                total.amount,
-
-            totalText:
-                total.original,
-
-            totalCurrency:
-                normalizeCurrency(
-                    total.currency,
-                    fee.currency ||
-                    'CAD'
-                ),
-
-            status,
-
-            isRefunded:
-                /partially refunded|partiellement rembourse|refunded|rembourse/.test(
-                    bodyKey
-                ),
-        };
-    }
-
-    async function waitForStripeDetails(
-        session,
-        timeout
-    ) {
-        const started =
-            Date.now();
-
-        let last = null;
-
-        while (
-            Date.now() -
-                started <
-            timeout
-        ) {
-            last =
-                scrapeStripeDetails(
-                    session
-                );
-
-            if (
-                Number.isFinite(
-                    last.feeAmount
-                ) &&
-                Number.isFinite(
-                    last.totalAmount
+            !Number.isFinite(
+                Number(
+                    stripe.totalAmount
                 )
-            ) {
-                return last;
-            }
-
-            /*
-             * If one of the two values is available for >2 sec,
-             * return the partial information and let Yapla warn.
-             */
-            if (
-                Number.isFinite(
-                    last.feeAmount
-                ) ||
-                Number.isFinite(
-                    last.totalAmount
-                )
-            ) {
-                await delay(2000);
-
-                return scrapeStripeDetails(
-                    session
-                );
-            }
-
-            await delay(250);
-        }
-
-        return last;
-    }
-
-    function sendStripeResultToYapla(
-        session,
-        stripe
-    ) {
-        const payload = {
-            type:
-                'ytb-payment-attestation-stripe-result',
-
-            paymentNumber:
-                session.paymentNumber,
-
-            stripe,
-        };
-
-        /*
-         * Primary transport.
-         */
-        try {
-            if (
-                window.opener &&
-                !window.opener.closed
-            ) {
-                window.opener.postMessage(
-                    payload,
-                    '*'
-                );
-
-                return true;
-            }
-        } catch (error) {
-            console.warn(
-                '[Attestation Yapla] postMessage vers opener impossible.',
-                error
+            )
+        ) {
+            warnings.push(
+                'Le total Stripe n’a pas été détecté.'
             );
         }
 
-        return false;
-    }
-
-    /*
-     * ============================================================
-     * WARNINGS
-     * ============================================================
-     */
-
-    function buildStripeWarnings(
-        job,
-        stripe
-    ) {
-        const warnings = [
-            ...(job.warnings || []),
-        ];
+        if (
+            !Number.isFinite(
+                Number(
+                    stripe.feeAmount
+                )
+            )
+        ) {
+            warnings.push(
+                "Les frais d'application Stripe n'ont pas été détectés."
+            );
+        }
 
         const invoiceTotal =
             Number(
-                job.invoice
-                    .invoiceTotal
+                invoice.invoiceTotal
             );
 
-        const hasFee =
-            Number.isFinite(
-                stripe.feeAmount
-            );
-
-        const hasTotal =
-            Number.isFinite(
+        const total =
+            Number(
                 stripe.totalAmount
             );
 
         const fee =
-            hasFee
-                ? Number(
-                    stripe.feeAmount
-                )
-                : null;
-
-        const total =
-            hasTotal
-                ? Number(
-                    stripe.totalAmount
-                )
-                : null;
-
-        if (!hasFee) {
-            warnings.push(
-                "Les frais d'application Stripe n'ont pas été détectés. La contribution volontaire sera indiquée à 0,00."
+            Number(
+                stripe.feeAmount
             );
-        }
-
-        if (!hasTotal) {
-            warnings.push(
-                "Le montant total Stripe n'a pas été détecté. Il sera calculé à partir de la facture et des frais détectés."
-            );
-        }
 
         if (
             Number.isFinite(
                 invoiceTotal
             ) &&
-            hasFee &&
-            hasTotal &&
+            Number.isFinite(total) &&
+            Number.isFinite(fee) &&
             !nearlyEqual(
                 invoiceTotal +
-                fee,
+                    fee,
                 total
             )
         ) {
             warnings.push(
-                `Les montants ne concordent pas : facture ${formatMoney(
+                `Les montants ne concordent pas : ` +
+                `${formatMoney(
                     invoiceTotal,
-                    job.invoice.currency
-                )} + contribution ${formatMoney(
+                    invoice.currency
+                )} + ` +
+                `${formatMoney(
                     fee,
-                    stripe.feeCurrency
-                )} ≠ total Stripe ${formatMoney(
+                    stripe.feeCurrency ||
+                    invoice.currency
+                )} ≠ ` +
+                `${formatMoney(
                     total,
-                    stripe.totalCurrency
+                    stripe.totalCurrency ||
+                    invoice.currency
                 )}.`
             );
         }
@@ -3219,7 +1666,15 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
             stripe.isRefunded
         ) {
             warnings.push(
-                'Le paiement Stripe semble remboursé ou partiellement remboursé.'
+                `Le paiement Stripe est remboursé ou partiellement remboursé${
+                    stripe.amountRefunded
+                        ? ` (${formatMoney(
+                            stripe.amountRefunded,
+                            stripe.totalCurrency ||
+                            invoice.currency
+                        )})`
+                        : ''
+                }.`
             );
         }
 
@@ -3232,7 +1687,20 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
             )
         ) {
             warnings.push(
-                `Le statut Stripe n'est pas « Succeeded/Réussi » : ${stripe.status}.`
+                `Statut Stripe : ${stripe.status}.`
+            );
+        }
+
+        if (
+            payment.status &&
+            !/accepte|accepted|succeeded|reussi/i.test(
+                normalizeKey(
+                    payment.status
+                )
+            )
+        ) {
+            warnings.push(
+                `Statut Yapla : ${payment.status}.`
             );
         }
 
@@ -3243,116 +1711,195 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
         ];
     }
 
-    /*
-     * ============================================================
-     * PDF CONFIRMATION
-     * ============================================================
-     */
-
-    function showFinalConfirmation(
+    function processStripeResult(
         job
     ) {
-        if (!job?.stripe) {
+        if (
+            !job?.stripe
+        ) {
             return;
         }
 
-        const warnings =
-            job.warnings ||
-            buildStripeWarnings(
-                job,
-                job.stripe
+        if (
+            !job.warnings
+                ?.length
+        ) {
+            generateAutomatically(
+                job
             );
+
+            return;
+        }
+
+        const warningHtml =
+            job.warnings
+                .map(
+                    warning =>
+                        `<li>${escapeHtml(
+                            warning
+                        )}</li>`
+                )
+                .join('');
 
         showModal({
             title:
-                "Générer l'attestation PDF",
+                'Données Stripe récupérées',
 
-            subtitle:
-                'Toutes les données ont été récupérées.',
+            body: `
+                <div>
+                    <strong>
+                        Total Stripe :
+                    </strong>
+                    ${escapeHtml(
+                        formatMoney(
+                            job.stripe
+                                .totalAmount,
+                            job.stripe
+                                .totalCurrency ||
+                            job.invoice
+                                .currency
+                        )
+                    )}
+                </div>
 
-            bodyHtml:
-                buildConfirmationHtml(
-                    job,
-                    job.stripe,
-                    warnings
-                ),
+                <div>
+                    <strong>
+                        Contribution Yapla :
+                    </strong>
+                    ${escapeHtml(
+                        formatMoney(
+                            job.stripe
+                                .feeAmount,
+                            job.stripe
+                                .feeCurrency ||
+                            job.invoice
+                                .currency
+                        )
+                    )}
+                </div>
+
+                <div class="warning">
+                    <strong>
+                        Vérification requise
+                    </strong>
+
+                    <ul>
+                        ${warningHtml}
+                    </ul>
+                </div>
+            `,
 
             confirmText:
                 'Générer le PDF',
 
-            cancelText:
-                'Fermer',
+            async onConfirm() {
+                removeModal();
 
-            onConfirm:
-                async ({
-                    confirmButton,
-                }) => {
-                    confirmButton.disabled =
-                        true;
-
-                    confirmButton.textContent =
-                        'Génération…';
-
-                    try {
-                        job.status =
-                            'generatingPdf';
-
-                        saveJob(job);
-
-                        await ensurePdfLibraries();
-
-                        generatePdf(
-                            job,
-                            job.stripe,
-                            warnings
-                        );
-
-                        job.status =
-                            'completed';
-
-                        saveJob(job);
-
-                        confirmButton.textContent =
-                            'PDF généré';
-
-                        renderYaplaStatus(
-                            job
-                        );
-
-                        setTimeout(
-                            removeModal,
-                            300
-                        );
-                    } catch (error) {
-                        console.error(
-                            '[Attestation Yapla] PDF',
-                            error
-                        );
-
-                        job.status =
-                            'error';
-
-                        job.errorMessage =
-                            error.message ||
-                            String(error);
-
-                        saveJob(job);
-
-                        confirmButton.disabled =
-                            false;
-
-                        confirmButton.textContent =
-                            'Réessayer';
-
-                        renderYaplaStatus(
-                            job
-                        );
-                    }
-                },
+                await generateJobPdf(
+                    job
+                );
+            },
         });
     }
 
     async function generateAutomatically(
+        job
+    ) {
+        showStatus(
+            'Données Stripe reçues. Génération du PDF…'
+        );
+
+        await generateJobPdf(
+            job
+        );
+    }
+
+    // ============================================================
+    // PDF LIBRARIES
+    // ============================================================
+
+    async function loadScript(
+        src,
+        id
+    ) {
+        if (
+            document.getElementById(
+                id
+            )
+        ) {
+            return;
+        }
+
+        await new Promise(
+            (
+                resolve,
+                reject
+            ) => {
+                const script =
+                    document.createElement(
+                        'script'
+                    );
+
+                script.id =
+                    id;
+
+                script.src =
+                    src;
+
+                script.onload =
+                    resolve;
+
+                script.onerror =
+                    () =>
+                        reject(
+                            new Error(
+                                `Impossible de charger ${src}`
+                            )
+                        );
+
+                document.head.appendChild(
+                    script
+                );
+            }
+        );
+    }
+
+    async function ensurePdfLibraries() {
+        if (
+            !window.jspdf
+                ?.jsPDF
+        ) {
+            await loadScript(
+                PDF_URL,
+                'ytb-pa-jspdf'
+            );
+        }
+
+        if (
+            !window.jspdf
+                ?.jsPDF
+                ?.API
+                ?.autoTable
+        ) {
+            await loadScript(
+                AUTOTABLE_URL,
+                'ytb-pa-autotable'
+            );
+        }
+
+        if (
+            !window.jspdf
+                ?.jsPDF
+                ?.API
+                ?.autoTable
+        ) {
+            throw new Error(
+                'jsPDF AutoTable indisponible.'
+            );
+        }
+    }
+
+    async function generateJobPdf(
         job
     ) {
         try {
@@ -3361,16 +1908,14 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
 
             saveJob(job);
 
-            renderYaplaStatus(
-                job
+            showStatus(
+                'Génération du PDF…'
             );
 
             await ensurePdfLibraries();
 
             generatePdf(
-                job,
-                job.stripe,
-                []
+                job
             );
 
             job.status =
@@ -3378,132 +1923,33 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
 
             saveJob(job);
 
-            renderYaplaStatus(
-                job
+            showStatus(
+                'PDF généré.'
             );
         } catch (error) {
+            console.error(
+                '[Attestation PDF]',
+                error
+            );
+
             job.status =
                 'error';
 
-            job.errorMessage =
+            job.error =
                 error.message ||
                 String(error);
 
             saveJob(job);
 
-            renderYaplaStatus(
-                job
+            showStatus(
+                `Erreur PDF : ${job.error}`
             );
         }
     }
 
-    function buildConfirmationHtml(
-        job,
-        stripe,
-        warnings
-    ) {
-        const invoice =
-            job.invoice;
-
-        const payment =
-            job.selectedPayment;
-
-        const fee =
-            Number.isFinite(
-                stripe.feeAmount
-            )
-                ? stripe.feeAmount
-                : 0;
-
-        const total =
-            Number.isFinite(
-                stripe.totalAmount
-            )
-                ? stripe.totalAmount
-                : (
-                    Number(
-                        invoice.invoiceTotal
-                    ) || 0
-                ) +
-                fee;
-
-        const currency =
-            stripe.totalCurrency ||
-            stripe.feeCurrency ||
-            invoice.currency;
-
-        const warningHtml =
-            warnings.length
-                ? `
-                    <div class="ya-warning-box">
-                        <strong>
-                            ${warnings.length}
-                            avertissement${warnings.length > 1 ? 's' : ''}
-                        </strong>
-
-                        <ul>
-                            ${warnings
-                                .map(
-                                    warning =>
-                                        `<li>${escapeHtml(warning)}</li>`
-                                )
-                                .join('')}
-                        </ul>
-                    </div>
-                `
-                : `
-                    <div class="ya-ok-box">
-                        Les données principales concordent.
-                    </div>
-                `;
-
-        return `
-            <dl class="ya-summary">
-                <dt>Association</dt>
-                <dd>${escapeHtml(invoice.companyName)}</dd>
-
-                <dt>Contributeur</dt>
-                <dd>
-                    ${escapeHtml(
-                        [
-                            invoice.contributor.organization,
-                            invoice.contributor.firstName,
-                            invoice.contributor.lastName,
-                            invoice.contributor.email,
-                        ]
-                            .filter(Boolean)
-                            .join(' - ')
-                    )}
-                </dd>
-
-                <dt>N° de facture</dt>
-                <dd>${escapeHtml(payment.invoiceNumber || invoice.invoiceNumber)}</dd>
-
-                <dt>N° de paiement</dt>
-                <dd>${escapeHtml(payment.paymentNumber)}</dd>
-
-                <dt>Date</dt>
-                <dd>${escapeHtml(payment.date)}</dd>
-
-                <dt>Montant association</dt>
-                <dd>${escapeHtml(formatMoney(invoice.invoiceTotal, invoice.currency))}</dd>
-
-                <dt>Contribution volontaire</dt>
-                <dd>${escapeHtml(formatMoney(fee, stripe.feeCurrency || invoice.currency))}</dd>
-
-                <dt>Total Stripe</dt>
-                <dd>${escapeHtml(formatMoney(total, currency))}</dd>
-            </dl>
-
-            ${warningHtml}
-        `;
-    }
-
-    /*
-     * ============================================================
-     * PDF
-     * ============================================================
-     */
+    // ============================================================
+    // PDF
+    // ============================================================
 
     function sanitizePdfText(
         value
@@ -3519,99 +1965,34 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
         text,
         x,
         y,
-        maxWidth,
-        options = {}
+        width
     ) {
         const lines =
             doc.splitTextToSize(
                 sanitizePdfText(
                     text
                 ),
-                maxWidth
+                width
             );
 
         doc.text(
             lines,
             x,
-            y,
-            options
+            y
         );
-
-        const lineHeight =
-            (
-                doc.getFontSize() *
-                0.3528
-            ) *
-            (
-                options.lineHeightFactor ||
-                1.2
-            );
 
         return (
             y +
             lines.length *
-                lineHeight
+                4.5
         );
     }
 
-    function addPdfPageNumbers(
-        doc
-    ) {
-        const count =
-            doc.getNumberOfPages();
-
-        for (
-            let page = 1;
-            page <= count;
-            page += 1
-        ) {
-            doc.setPage(page);
-
-            doc.setFont(
-                'helvetica',
-                'normal'
-            );
-
-            doc.setFontSize(8);
-
-            doc.setTextColor(
-                120,
-                120,
-                120
-            );
-
-            doc.text(
-                `Page ${page} / ${count}`,
-                198,
-                290,
-                {
-                    align:
-                        'right',
-                }
-            );
-        }
-    }
-
-    function generatePdf(
-        job,
-        stripe
-    ) {
-        const namespace =
-            window.jspdf;
-
-        if (
-            !namespace?.jsPDF ||
-            !namespace.jsPDF.API
-                ?.autoTable
-        ) {
-            throw new Error(
-                'jsPDF et AutoTable ne sont pas disponibles.'
-            );
-        }
-
+    function generatePdf(job) {
         const {
             jsPDF,
-        } = namespace;
+        } =
+            window.jspdf;
 
         const doc =
             new jsPDF({
@@ -3634,73 +2015,59 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
         const payment =
             job.selectedPayment;
 
-        const currency =
-            normalizeCurrency(
-                stripe.totalCurrency ||
-                stripe.feeCurrency ||
-                invoice.currency,
-
-                invoice.currency
-            );
-
-        const feeAmount =
-            Number.isFinite(
-                stripe.feeAmount
-            )
-                ? stripe.feeAmount
-                : 0;
+        const stripe =
+            job.stripe;
 
         const invoiceTotal =
             Number.isFinite(
-                invoice.invoiceTotal
+                Number(
+                    invoice.invoiceTotal
+                )
             )
-                ? invoice.invoiceTotal
-                : invoice.items.reduce(
-                    (
-                        sum,
-                        item
-                    ) =>
-                        sum +
-                        (
-                            Number.isFinite(
-                                item.amount
-                            )
-                                ? item.amount
-                                : 0
-                        ),
-                    0
-                ) +
-                invoice.taxes.reduce(
-                    (
-                        sum,
-                        tax
-                    ) =>
-                        sum +
-                        (
-                            Number.isFinite(
-                                tax.amount
-                            )
-                                ? tax.amount
-                                : 0
-                        ),
-                    0
-                );
+                ? Number(
+                    invoice.invoiceTotal
+                )
+                : 0;
 
-        const totalAmount =
+        const fee =
             Number.isFinite(
-                stripe.totalAmount
+                Number(
+                    stripe.feeAmount
+                )
             )
-                ? stripe.totalAmount
+                ? Number(
+                    stripe.feeAmount
+                )
+                : 0;
+
+        const total =
+            Number.isFinite(
+                Number(
+                    stripe.totalAmount
+                )
+            )
+                ? Number(
+                    stripe.totalAmount
+                )
                 : invoiceTotal +
-                feeAmount;
+                    fee;
+
+        const currency =
+            normalizeCurrency(
+                stripe.totalCurrency ||
+                    stripe.feeCurrency ||
+                    invoice.currency
+            );
 
         const margin = 12;
-        const pageWidth =
-            doc.internal.pageSize
+
+        const width =
+            doc.internal
+                .pageSize
                 .getWidth();
 
         const contentWidth =
-            pageWidth -
+            width -
             margin * 2;
 
         let y = 15;
@@ -3716,7 +2083,9 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
             'bold'
         );
 
-        doc.setFontSize(22);
+        doc.setFontSize(
+            22
+        );
 
         doc.text(
             'Yapla',
@@ -3730,11 +2099,13 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
             35
         );
 
-        doc.setFontSize(15);
+        doc.setFontSize(
+            15
+        );
 
         doc.text(
             'ATTESTATION DE PAIEMENT',
-            pageWidth / 2,
+            width / 2,
             29,
             {
                 align:
@@ -3747,14 +2118,15 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
             'normal'
         );
 
-        doc.setFontSize(9.5);
+        doc.setFontSize(
+            9.5
+        );
 
         doc.text(
             `Attestation n° ${sanitizePdfText(
                 payment.invoiceNumber ||
-                invoice.invoiceNumber ||
-                invoice.billingId ||
-                ''
+                    invoice.invoiceNumber ||
+                    invoice.billingId
             )}`,
             margin,
             42
@@ -3763,23 +2135,16 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
         doc.text(
             `Date d'émission : ${sanitizePdfText(
                 payment.date ||
-                invoice.billingDate ||
-                ''
+                    invoice.billingDate
             )}`,
             margin,
             48
         );
 
-        doc.setDrawColor(
-            145,
-            145,
-            145
-        );
-
         doc.line(
             margin,
             56,
-            pageWidth - margin,
+            width - margin,
             56
         );
 
@@ -3789,8 +2154,6 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
             'helvetica',
             'bold'
         );
-
-        doc.setFontSize(10);
 
         doc.text(
             'Bénéficiaire :',
@@ -3808,8 +2171,6 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
             'helvetica',
             'normal'
         );
-
-        doc.setFontSize(9.5);
 
         let leftY =
             y + 6;
@@ -3837,7 +2198,7 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
                 );
         }
 
-        const cityLine =
+        const city =
             [
                 invoice.address.city,
                 invoice.address.state,
@@ -3846,11 +2207,11 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
                 .filter(Boolean)
                 .join(', ');
 
-        if (cityLine) {
+        if (city) {
             leftY =
                 addWrappedText(
                     doc,
-                    cityLine,
+                    city,
                     margin,
                     leftY,
                     88
@@ -3871,37 +2232,30 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
                 );
         }
 
-        let rightY =
-            y + 6;
-
         doc.text(
             PLATFORM_ADDRESS.name,
-            pageWidth - margin,
-            rightY,
+            width - margin,
+            y + 6,
             {
                 align:
                     'right',
             }
         );
-
-        rightY += 5;
 
         doc.text(
             PLATFORM_ADDRESS.address,
-            pageWidth - margin,
-            rightY,
+            width - margin,
+            y + 11,
             {
                 align:
                     'right',
             }
         );
 
-        rightY += 5;
-
         doc.text(
             PLATFORM_ADDRESS.city,
-            pageWidth - margin,
-            rightY,
+            width - margin,
+            y + 16,
             {
                 align:
                     'right',
@@ -3911,14 +2265,14 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
         y =
             Math.max(
                 leftY,
-                rightY + 5
+                y + 22
             ) +
-            6;
+            5;
 
         doc.line(
             margin,
             y,
-            pageWidth - margin,
+            width - margin,
             y
         );
 
@@ -3935,7 +2289,7 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
             y
         );
 
-        y += 15;
+        y += 14;
 
         doc.text(
             'Contributeur :',
@@ -3950,55 +2304,99 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
             'normal'
         );
 
-        if (
-            invoice.contributor
-                .organization
-        ) {
-            y =
-                addWrappedText(
-                    doc,
-                    invoice.contributor
-                        .organization,
-                    margin,
-                    y,
-                    contentWidth
-                );
-        }
-
-        const contributorName =
+        const contributor =
             [
-                invoice.contributor.lastName,
-                invoice.contributor.firstName,
-            ]
-                .filter(Boolean)
-                .join(', ');
+                invoice.contributor
+                    .organization,
 
-        if (contributorName) {
-            y =
-                addWrappedText(
-                    doc,
-                    contributorName,
-                    margin,
-                    y,
-                    contentWidth
-                );
-        }
+                [
+                    invoice.contributor
+                        .lastName,
+                    invoice.contributor
+                        .firstName,
+                ]
+                    .filter(Boolean)
+                    .join(', '),
 
-        if (
-            invoice.contributor.email
+                invoice.contributor
+                    .email,
+            ].filter(Boolean);
+
+        for (
+            const line
+            of contributor
         ) {
             y =
                 addWrappedText(
                     doc,
-                    invoice.contributor
-                        .email,
+                    line,
                     margin,
                     y,
                     contentWidth
                 );
         }
 
-        y += 10;
+        y += 7;
+
+        doc.setFont(
+            'helvetica',
+            'bold'
+        );
+
+        doc.text(
+            'Date du paiement :',
+            margin,
+            y
+        );
+
+        doc.setFont(
+            'helvetica',
+            'normal'
+        );
+
+        doc.text(
+            sanitizePdfText(
+                payment.date ||
+                    invoice.billingDate
+            ),
+            48,
+            y
+        );
+
+        y += 6;
+
+        doc.setFont(
+            'helvetica',
+            'bold'
+        );
+
+        doc.text(
+            'Mode de versement :',
+            margin,
+            y
+        );
+
+        doc.setFont(
+            'helvetica',
+            'normal'
+        );
+
+        doc.text(
+            /carte|card|credit/i.test(
+                normalizeKey(
+                    payment.method
+                )
+            )
+                ? 'Carte bancaire'
+                : sanitizePdfText(
+                    payment.method ||
+                        'Non indiqué'
+                ),
+            51,
+            y
+        );
+
+        y += 14;
 
         doc.setFont(
             'helvetica',
@@ -4031,12 +2429,10 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
         y =
             addWrappedText(
                 doc,
-
                 `- ${invoice.companyName} reconnaît avoir reçu la somme de ${formatMoney(
                     invoiceTotal,
                     invoice.currency
                 )} pour ${descriptions}.`,
-
                 margin + 6,
                 y,
                 contentWidth - 6
@@ -4047,18 +2443,16 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
         y =
             addWrappedText(
                 doc,
-
                 `- Yapla reconnaît avoir reçu une contribution volontaire de ${formatMoney(
-                    feeAmount,
+                    fee,
                     currency
                 )}.`,
-
                 margin + 6,
                 y,
                 contentWidth - 6
             );
 
-        y += 11;
+        y += 10;
 
         doc.setFont(
             'helvetica',
@@ -4073,25 +2467,20 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
 
         y += 5;
 
-        const tableRows = [];
+        const rows = [];
 
         for (
             const item
             of invoice.items
         ) {
-            tableRows.push([
+            rows.push([
                 sanitizePdfText(
                     item.fullDescription ||
-                    item.description ||
-                    'Transaction'
+                        'Transaction'
                 ),
 
                 formatMoney(
-                    Number.isFinite(
-                        item.amount
-                    )
-                        ? item.amount
-                        : 0,
+                    item.amount,
                     invoice.currency
                 ),
             ]);
@@ -4101,32 +2490,28 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
             const tax
             of invoice.taxes
         ) {
-            tableRows.push([
+            rows.push([
                 sanitizePdfText(
                     tax.label
                 ),
 
                 formatMoney(
-                    Number.isFinite(
-                        tax.amount
-                    )
-                        ? tax.amount
-                        : 0,
+                    tax.amount,
                     invoice.currency
                 ),
             ]);
         }
 
-        tableRows.push([
+        rows.push([
             'Contribution volontaire Yapla',
 
             formatMoney(
-                feeAmount,
+                fee,
                 currency
             ),
         ]);
 
-        tableRows.push([
+        rows.push([
             {
                 content:
                     'Total',
@@ -4134,30 +2519,21 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
                 styles: {
                     fontStyle:
                         'bold',
+
                     halign:
                         'right',
                 },
             },
 
             formatMoney(
-                totalAmount,
+                total,
                 currency
             ),
         ]);
 
         doc.autoTable({
-            startY: y,
-
-            margin: {
-                left:
-                    margin,
-
-                right:
-                    margin,
-
-                bottom:
-                    16,
-            },
+            startY:
+                y,
 
             head: [
                 [
@@ -4167,10 +2543,18 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
             ],
 
             body:
-                tableRows,
+                rows,
 
             theme:
                 'grid',
+
+            margin: {
+                left:
+                    margin,
+
+                right:
+                    margin,
+            },
 
             styles: {
                 font:
@@ -4179,77 +2563,27 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
                 fontSize:
                     8.7,
 
-                textColor:
-                    [
-                        35,
-                        35,
-                        35,
-                    ],
-
                 cellPadding:
                     2.5,
-
-                lineColor:
-                    [
-                        70,
-                        70,
-                        70,
-                    ],
-
-                lineWidth:
-                    0.25,
-
-                overflow:
-                    'linebreak',
-            },
-
-            headStyles: {
-                fillColor:
-                    [
-                        255,
-                        255,
-                        255,
-                    ],
-
-                textColor:
-                    [
-                        25,
-                        25,
-                        25,
-                    ],
-
-                fontStyle:
-                    'bold',
             },
 
             columnStyles: {
-                0: {
-                    cellWidth:
-                        contentWidth -
-                        42,
-                },
-
                 1: {
-                    cellWidth:
-                        42,
-
                     halign:
                         'right',
+
+                    cellWidth:
+                        42,
                 },
             },
         });
 
-        addPdfPageNumbers(
-            doc
-        );
-
-        const contributorFileName =
+        const contributorName =
             invoice.contributor
                 .organization ||
             [
                 invoice.contributor
                     .firstName,
-
                 invoice.contributor
                     .lastName,
             ]
@@ -4257,82 +2591,19 @@ ${escapeHtml(payment.status || 'Statut inconnu')} - ${escapeHtml(payment.totalTe
                 .join(' ') ||
             invoice.companyName;
 
-        const fileName =
+        const filename =
             `Attestation de paiement - ` +
             `${safeFilePart(
                 payment.invoiceNumber ||
-                invoice.invoiceNumber ||
-                invoice.billingId
+                    invoice.invoiceNumber ||
+                    invoice.billingId
             )} - ` +
             `${safeFilePart(
-                contributorFileName
+                contributorName
             )}.pdf`;
 
         doc.save(
-            fileName
-        );
-    }
-
-    /*
-     * ============================================================
-     * WAIT
-     * ============================================================
-     */
-
-    function waitFor(
-        getter,
-        options = {}
-    ) {
-        const timeout =
-            options.timeout ??
-            30000;
-
-        const interval =
-            options.interval ??
-            100;
-
-        const started =
-            Date.now();
-
-        return new Promise(
-            (resolve, reject) => {
-                const tick = () => {
-                    try {
-                        const result =
-                            getter();
-
-                        if (result) {
-                            resolve(
-                                result
-                            );
-
-                            return;
-                        }
-                    } catch {}
-
-                    if (
-                        Date.now() -
-                            started >=
-                        timeout
-                    ) {
-                        reject(
-                            new Error(
-                                options.message ||
-                                'Délai dépassé.'
-                            )
-                        );
-
-                        return;
-                    }
-
-                    setTimeout(
-                        tick,
-                        interval
-                    );
-                };
-
-                tick();
-            }
+            filename
         );
     }
 })();
