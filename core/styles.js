@@ -1,4 +1,4 @@
-```javascript
+javascript
 (() => {
     "use strict";
 
@@ -340,4 +340,4 @@
         console.log("[Yapla Toolbox] Styles module loaded.");
     }
 })();
-```
+
