@@ -1,4 +1,4 @@
-```javascript
+javascript
 (() => {
     "use strict";
 
@@ -94,4 +94,4 @@
         console.log("[Yapla Toolbox] Registry loaded.");
     }
 })();
-```
+
